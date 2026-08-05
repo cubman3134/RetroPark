@@ -22,12 +22,13 @@ FetchContent_Declare(nlohmann_json
   GIT_TAG v3.11.3)
 FetchContent_MakeAvailable(doctest nlohmann_json)
 
-# Library target — sources appended by later tasks. CMake requires a
-# buildable target to have at least one source at generate time, so this
-# starts with a placeholder that later tasks replace.
-add_library(retropark STATIC src/retropark.cpp)
+# Library target — sources appended by later tasks.
+add_library(retropark STATIC
+  src/loader/Manifest.cpp)
 target_include_directories(retropark PUBLIC include)
+target_include_directories(retropark PRIVATE src)
 target_compile_features(retropark PUBLIC cxx_std_17)
+target_link_libraries(retropark PUBLIC nlohmann_json::nlohmann_json)
 
 enable_testing()
 add_subdirectory(tests)
