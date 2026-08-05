@@ -143,6 +143,15 @@ rp_result D3D11Backend::readback_surface_pixel(uint32_t index, uint32_t x, uint3
 
 rp_result D3D11Backend::composite_and_present(uint32_t ready_index, bool has_frame,
                                               uint8_t* out_rgba, std::string& err) {
+    // Windowed readback (swapchain present + CPU pixel readback in the same call) is not
+    // implemented: the render target in that path is the back buffer, but the readback below
+    // copies from the offscreen texture, which is never drawn into when a swapchain exists.
+    // That would silently hand the caller uninitialized/stale pixels. Reject it explicitly
+    // rather than special-case it now; full windowed readback is a later-slice feature.
+    if (swapchain_ && out_rgba) {
+        err = "windowed readback (swapchain + out_rgba) is not supported in Slice A";
+        return RP_ERR_UNSUPPORTED;
+    }
     if (!compositor_ready_) {
         rp_result r = compositor_.initialize(device_.Get(), err);
         if (r != RP_OK) return r;
