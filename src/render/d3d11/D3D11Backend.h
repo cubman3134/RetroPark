@@ -1,5 +1,6 @@
 #pragma once
 #include "render/IRenderBackend.h"
+#include "render/d3d11/D3D11Compositor.h"
 #include <d3d11_1.h>
 #include <dxgi1_2.h>
 #include <wrl/client.h>
@@ -63,5 +64,10 @@ protected:
     Microsoft::WRL::ComPtr<IDXGISwapChain1> swapchain_;   // null when headless
     std::vector<Surface> surfaces_;
     uint32_t width_ = 0, height_ = 0;
+
+    D3D11Compositor compositor_;
+    bool compositor_ready_ = false;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> offscreen_;
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> offscreen_rtv_;
 };
 }

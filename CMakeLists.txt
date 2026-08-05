@@ -28,13 +28,15 @@ add_library(retropark STATIC
   src/loader/CoreLoader.cpp
   src/loader/Win32CoreModule.cpp
   src/render/SurfaceRing.cpp)
-target_sources(retropark PRIVATE src/render/d3d11/D3D11Backend.cpp)
+target_sources(retropark PRIVATE
+  src/render/d3d11/D3D11Backend.cpp
+  src/render/d3d11/D3D11Compositor.cpp)
 target_include_directories(retropark PUBLIC include)
 target_include_directories(retropark PRIVATE src)
 target_compile_features(retropark PUBLIC cxx_std_17)
 target_link_libraries(retropark PUBLIC nlohmann_json::nlohmann_json)
 if (WIN32)
-  target_link_libraries(retropark PUBLIC d3d11 dxgi dxguid)
+  target_link_libraries(retropark PUBLIC d3d11 dxgi dxguid d3dcompiler)
 endif()
 
 enable_testing()

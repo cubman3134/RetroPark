@@ -1,4 +1,5 @@
 #include "render/d3d11/D3D11Backend.h"
+#include <cstring>
 using Microsoft::WRL::ComPtr;
 
 namespace rp {
@@ -108,8 +109,50 @@ rp_result D3D11Backend::readback_surface_pixel(uint32_t index, uint32_t x, uint3
     return RP_OK;
 }
 
-rp_result D3D11Backend::composite_and_present(uint32_t, bool, uint8_t*, std::string& err) {
-    err = "composite not implemented until Task 9";
-    return RP_ERR_UNSUPPORTED;   // replaced in Task 9
+rp_result D3D11Backend::composite_and_present(uint32_t ready_index, bool has_frame,
+                                              uint8_t* out_rgba, std::string& err) {
+    if (!compositor_ready_) {
+        rp_result r = compositor_.initialize(device_.Get(), err);
+        if (r != RP_OK) return r;
+        compositor_ready_ = true;
+    }
+    // Ensure an offscreen RTV of the current size (headless target).
+    if (!offscreen_) {
+        D3D11_TEXTURE2D_DESC d{};
+        d.Width=width_; d.Height=height_; d.MipLevels=1; d.ArraySize=1;
+        d.Format=DXGI_FORMAT_R8G8B8A8_UNORM; d.SampleDesc.Count=1;
+        d.Usage=D3D11_USAGE_DEFAULT; d.BindFlags=D3D11_BIND_RENDER_TARGET;
+        if (FAILED(device_->CreateTexture2D(&d, nullptr, &offscreen_))) { err="offscreen"; return RP_ERR_DEVICE; }
+        if (FAILED(device_->CreateRenderTargetView(offscreen_.Get(), nullptr, &offscreen_rtv_))) { err="offRTV"; return RP_ERR_DEVICE; }
+    }
+
+    ID3D11ShaderResourceView* core_srv = nullptr;
+    bool acquired = false;
+    if (has_frame && ready_index < surfaces_.size()) {
+        if (FAILED(surfaces_[ready_index].keyed->AcquireSync(1, 100))) { err="acquire timeout"; return RP_ERR_TIMEOUT; }
+        acquired = true;
+        core_srv = surfaces_[ready_index].srv.Get();
+    }
+
+    rp_result r = compositor_.render(ctx_.Get(), offscreen_rtv_.Get(), core_srv, width_, height_, err);
+
+    if (acquired) surfaces_[ready_index].keyed->ReleaseSync(0);
+    if (r != RP_OK) return r;
+
+    if (out_rgba) {
+        D3D11_TEXTURE2D_DESC sd{};
+        sd.Width=width_; sd.Height=height_; sd.MipLevels=1; sd.ArraySize=1;
+        sd.Format=DXGI_FORMAT_R8G8B8A8_UNORM; sd.SampleDesc.Count=1;
+        sd.Usage=D3D11_USAGE_STAGING; sd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Texture2D> staging;
+        if (FAILED(device_->CreateTexture2D(&sd, nullptr, &staging))) { err="composite staging"; return RP_ERR_DEVICE; }
+        ctx_->CopyResource(staging.Get(), offscreen_.Get());
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (FAILED(ctx_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m))) { err="composite map"; return RP_ERR_DEVICE; }
+        for (uint32_t y=0; y<height_; ++y)
+            memcpy(out_rgba + y*width_*4, (const uint8_t*)m.pData + y*m.RowPitch, width_*4);
+        ctx_->Unmap(staging.Get(), 0);
+    }
+    return RP_OK;
 }
 }
