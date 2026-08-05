@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <cstdint>
 
 namespace rp {
@@ -20,8 +21,10 @@ private:
     uint32_t width_ = 0, height_ = 0;
     uint64_t generation_ = 0;
     uint32_t producer_cursor_ = 0;
-    bool     has_ready_ = false;
-    uint32_t ready_index_ = 0;
-    uint64_t ready_generation_ = 0;
+    // Written by accept_submit (core's render thread) and read by latest_ready
+    // (host/present thread); synchronized via acquire/release on has_ready_.
+    std::atomic<bool>     has_ready_{false};
+    std::atomic<uint32_t> ready_index_{0};
+    std::atomic<uint64_t> ready_generation_{0};
 };
 }

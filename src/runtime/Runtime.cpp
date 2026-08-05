@@ -79,6 +79,7 @@ rp_result Runtime::load_core(const std::string& core_dir) {
     CoreManifest m; std::string err;
     if (parse_manifest(ss.str(), m, err) != RP_OK) return RP_ERR_BAD_ARG;
     if (m.type != RP_CORE_PRESENTING) return RP_ERR_UNSUPPORTED; // driven not in Slice A
+    if (m.graphics_api != RP_GFX_D3D11) return RP_ERR_UNSUPPORTED; // only d3d11 in Slice A
 
     std::string dll = core_dir + "/" + m.entry;
     if (Win32CoreModule::open(dll, module_, err) != RP_OK) return RP_ERR_NOT_FOUND;

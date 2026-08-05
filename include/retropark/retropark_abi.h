@@ -61,10 +61,10 @@ typedef struct rp_host_iface {
 } rp_host_iface;
 
 typedef struct rp_core_info {
-    uint32_t        abi_version;
-    rp_core_type    type;
-    rp_graphics_api graphics_api;
-    const char*     id;
+    uint32_t    abi_version;
+    uint32_t    type;           /* rp_core_type */
+    uint32_t    graphics_api;   /* rp_graphics_api */
+    const char* id;
 } rp_core_info;
 
 typedef struct rp_core_abi {
