@@ -24,7 +24,8 @@ FetchContent_MakeAvailable(doctest nlohmann_json)
 
 # Library target — sources appended by later tasks.
 add_library(retropark STATIC
-  src/loader/Manifest.cpp)
+  src/loader/Manifest.cpp
+  src/loader/CoreLoader.cpp)
 target_include_directories(retropark PUBLIC include)
 target_include_directories(retropark PRIVATE src)
 target_compile_features(retropark PUBLIC cxx_std_17)
