@@ -36,5 +36,6 @@ private:
     std::mutex input_mtx_;
     uint32_t width_ = 64, height_ = 64;
     bool core_loaded_ = false;
+    bool init_ok_ = false;
 };
 }

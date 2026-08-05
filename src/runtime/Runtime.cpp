@@ -17,7 +17,7 @@ static void host_input(rp_host* h, rp_input_state* out) {
 Runtime::Runtime(rp_graphics_api, void* native_window) : native_window_(native_window) {
     backend_ = std::make_unique<D3D11Backend>();
     std::string err;
-    backend_->initialize(native_window_, width_, height_, err);
+    init_ok_ = (backend_->initialize(native_window_, width_, height_, err) == RP_OK);
     host_iface_.host = reinterpret_cast<rp_host*>(this);
     host_iface_.log = host_log;
     host_iface_.submit_frame = host_submit;
@@ -39,12 +39,15 @@ void Runtime::set_input(const rp_input_state& in) {
 }
 
 rp_result Runtime::rebuild_surfaces(std::string& err) {
+    if (loader_.state() == LoaderState::Started) {
+        std::string e;
+        loader_.stop(e);
+    }
     std::vector<rp_surface_desc> descs;
     rp_result r = backend_->allocate_surfaces(ring_.slot_count(), width_, height_, descs, err);
     if (r != RP_OK) return r;
     uint64_t gen = ring_.reallocate(width_, height_);
     for (auto& d : descs) d.generation = gen;
-    if (loader_.state() == LoaderState::Started) { std::string e; loader_.stop(e); }
     if (loader_.state() == LoaderState::Created)
         return loader_.set_surfaces(descs.data(), (uint32_t)descs.size(), err);
     return RP_OK;
@@ -53,7 +56,12 @@ rp_result Runtime::rebuild_surfaces(std::string& err) {
 rp_result Runtime::resize(uint32_t w, uint32_t h) {
     width_ = w; height_ = h;
     std::string err;
-    if (!core_loaded_) return backend_->initialize(native_window_, w, h, err);
+    if (!core_loaded_) {
+        rp_result r = backend_->initialize(native_window_, w, h, err);
+        init_ok_ = (r == RP_OK);
+        return r;
+    }
+    if (!init_ok_) return RP_ERR_DEVICE;
     rp_result r = rebuild_surfaces(err);
     if (r != RP_OK) return r;
     if (loader_.state() == LoaderState::Created) return loader_.start(err);
@@ -61,6 +69,9 @@ rp_result Runtime::resize(uint32_t w, uint32_t h) {
 }
 
 rp_result Runtime::load_core(const std::string& core_dir) {
+    if (!init_ok_) return RP_ERR_DEVICE;
+    if (core_loaded_ || loader_.state() != LoaderState::Unloaded) unload_core();
+
     std::string manifest_path = core_dir + "/core.json";
     std::ifstream f(manifest_path, std::ios::binary);
     if (!f) return RP_ERR_NOT_FOUND;
@@ -71,17 +82,32 @@ rp_result Runtime::load_core(const std::string& core_dir) {
 
     std::string dll = core_dir + "/" + m.entry;
     if (Win32CoreModule::open(dll, module_, err) != RP_OK) return RP_ERR_NOT_FOUND;
-    if (loader_.load(module_.get(), err) != RP_OK) return RP_ERR_ABI_MISMATCH;
-    if (loader_.create(&host_iface_, err) != RP_OK) return RP_ERR_INTERNAL;
+    if (loader_.load(module_.get(), err) != RP_OK) {
+        module_.reset();
+        return RP_ERR_ABI_MISMATCH;
+    }
+    if (loader_.create(&host_iface_, err) != RP_OK) {
+        loader_.destroy();
+        module_.reset();
+        return RP_ERR_INTERNAL;
+    }
 
     core_loaded_ = true;
     rp_result r = rebuild_surfaces(err);
-    if (r != RP_OK) return r;
-    return loader_.start(err);
+    if (r != RP_OK) {
+        unload_core();
+        return r;
+    }
+    r = loader_.start(err);
+    if (r != RP_OK) {
+        unload_core();
+        return r;
+    }
+    return RP_OK;
 }
 
 rp_result Runtime::unload_core() {
-    if (!core_loaded_) return RP_OK;
+    if (!core_loaded_ && loader_.state() == LoaderState::Unloaded) return RP_OK;
     loader_.destroy();
     module_.reset();
     core_loaded_ = false;
