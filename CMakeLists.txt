@@ -39,5 +39,7 @@ if (WIN32)
   target_link_libraries(retropark PUBLIC d3d11 dxgi dxguid d3dcompiler)
 endif()
 
+add_subdirectory(cores/refcore_present)
+
 enable_testing()
 add_subdirectory(tests)
