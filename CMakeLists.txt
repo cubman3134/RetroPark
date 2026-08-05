@@ -26,7 +26,8 @@ FetchContent_MakeAvailable(doctest nlohmann_json)
 add_library(retropark STATIC
   src/loader/Manifest.cpp
   src/loader/CoreLoader.cpp
-  src/loader/Win32CoreModule.cpp)
+  src/loader/Win32CoreModule.cpp
+  src/render/SurfaceRing.cpp)
 target_include_directories(retropark PUBLIC include)
 target_include_directories(retropark PRIVATE src)
 target_compile_features(retropark PUBLIC cxx_std_17)
