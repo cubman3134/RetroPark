@@ -69,5 +69,6 @@ protected:
     bool compositor_ready_ = false;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> offscreen_;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> offscreen_rtv_;
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> backbuffer_rtv_;   // set when swapchain_ is non-null
 };
 }

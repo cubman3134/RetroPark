@@ -41,6 +41,7 @@ if (WIN32)
 endif()
 
 add_subdirectory(cores/refcore_present)
+add_subdirectory(harness/windowed)
 
 enable_testing()
 add_subdirectory(tests)

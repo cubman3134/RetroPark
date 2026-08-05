@@ -36,10 +36,41 @@ bool D3D11Backend::probe_shared_keyed_mutex() {
 rp_result D3D11Backend::initialize(void* native_window, uint32_t w, uint32_t h, std::string& err) {
     width_ = w; height_ = h;
     const bool headless = (native_window == nullptr);
-    rp_result r = make_device(headless, device_, ctx_, err);
+    // The reference core (refcore_present) always creates a WARP device and shares its
+    // surfaces with the host via an NT handle + keyed mutex; that interop only succeeds
+    // when both devices sit on the SAME adapter. So the windowed host device is ALSO WARP
+    // here, matching the core, rather than D3D_DRIVER_TYPE_HARDWARE. Moving the host to a
+    // hardware adapter is a deliberate later-slice optimization that requires solving
+    // cross-adapter (or same-adapter-hardware) sharing first — don't "optimize" this to
+    // hardware without addressing that.
+    rp_result r = make_device(/*warp=*/true, device_, ctx_, err);
     if (r != RP_OK) return r;
     if (FAILED(device_.As(&device1_))) { err = "no ID3D11Device1"; return RP_ERR_DEVICE; }
-    // Swapchain creation for the windowed path is added in the harness task; headless needs none.
+
+    swapchain_.Reset();
+    backbuffer_rtv_.Reset();
+    if (!headless) {
+        ComPtr<IDXGIDevice> dxgiDev;
+        if (FAILED(device_.As(&dxgiDev))) { err = "no IDXGIDevice"; return RP_ERR_DEVICE; }
+        ComPtr<IDXGIAdapter> adapter;
+        if (FAILED(dxgiDev->GetAdapter(&adapter))) { err = "no IDXGIAdapter"; return RP_ERR_DEVICE; }
+        ComPtr<IDXGIFactory2> factory;
+        if (FAILED(adapter->GetParent(IID_PPV_ARGS(&factory)))) { err = "no IDXGIFactory2"; return RP_ERR_DEVICE; }
+
+        DXGI_SWAP_CHAIN_DESC1 sc{};
+        sc.Width = w; sc.Height = h; sc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        sc.SampleDesc.Count = 1; sc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        sc.BufferCount = 2; sc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        if (FAILED(factory->CreateSwapChainForHwnd(device_.Get(), static_cast<HWND>(native_window),
+                                                   &sc, nullptr, nullptr, &swapchain_))) {
+            err = "swapchain"; return RP_ERR_DEVICE;
+        }
+        ComPtr<ID3D11Texture2D> bb;
+        if (FAILED(swapchain_->GetBuffer(0, IID_PPV_ARGS(&bb)))) { err = "swapchain buffer"; return RP_ERR_DEVICE; }
+        if (FAILED(device_->CreateRenderTargetView(bb.Get(), nullptr, &backbuffer_rtv_))) {
+            err = "backbuffer RTV"; return RP_ERR_DEVICE;
+        }
+    }
     return RP_OK;
 }
 
@@ -117,8 +148,9 @@ rp_result D3D11Backend::composite_and_present(uint32_t ready_index, bool has_fra
         if (r != RP_OK) return r;
         compositor_ready_ = true;
     }
-    // Ensure an offscreen RTV of the current size (headless target).
-    if (!offscreen_) {
+    // Ensure an offscreen RTV of the current size. Needed whenever there's no swapchain
+    // (headless target) or a readback was requested even while windowed.
+    if (!offscreen_ && (!swapchain_ || out_rgba)) {
         D3D11_TEXTURE2D_DESC d{};
         d.Width=width_; d.Height=height_; d.MipLevels=1; d.ArraySize=1;
         d.Format=DXGI_FORMAT_R8G8B8A8_UNORM; d.SampleDesc.Count=1;
@@ -136,10 +168,13 @@ rp_result D3D11Backend::composite_and_present(uint32_t ready_index, bool has_fra
         core_srv = surfaces_[ready_index].srv.Get();
     }
 
-    rp_result r = compositor_.render(ctx_.Get(), offscreen_rtv_.Get(), core_srv, width_, height_, err);
+    ID3D11RenderTargetView* target = swapchain_ ? backbuffer_rtv_.Get() : offscreen_rtv_.Get();
+    rp_result r = compositor_.render(ctx_.Get(), target, core_srv, width_, height_, err);
 
     if (acquired) surfaces_[ready_index].keyed->ReleaseSync(0);
     if (r != RP_OK) return r;
+
+    if (swapchain_) swapchain_->Present(1, 0);
 
     if (out_rgba) {
         D3D11_TEXTURE2D_DESC sd{};
