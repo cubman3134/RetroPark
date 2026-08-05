@@ -46,3 +46,31 @@ TEST_CASE("d3d11: cross-device shared keyed-mutex handoff") {
     CHECK(rgba[1] == 0);
     CHECK(rgba[2] == 0);
 }
+
+// Re-allocating surfaces on the same backend must not leak or double-close the
+// underlying NT shared handles: allocate_surfaces() clears surfaces_ and rebuilds
+// it, so the previous batch's Surface objects are destroyed (closing their
+// handles) while the new batch is moved in cleanly.
+TEST_CASE("d3d11: allocate_surfaces twice on the same backend does not crash") {
+    if (!D3D11Backend::probe_shared_keyed_mutex()) {
+        WARN("environment lacks shared keyed-mutex support; skipping");
+        return;
+    }
+    D3D11Backend host;
+    std::string err;
+    REQUIRE(host.initialize(nullptr, 8, 8, err) == RP_OK);
+
+    std::vector<rp_surface_desc> descs;
+    REQUIRE(host.allocate_surfaces(2, 8, 8, descs, err) == RP_OK);
+    REQUIRE(descs.size() == 2);
+    CHECK(descs[0].shared_handle != nullptr);
+    CHECK(descs[1].shared_handle != nullptr);
+
+    // Re-allocate: this exercises surfaces_.clear() destroying the first batch's
+    // Surface objects (closing their handles exactly once) and then moving the
+    // freshly created second batch into surfaces_.
+    REQUIRE(host.allocate_surfaces(2, 8, 8, descs, err) == RP_OK);
+    REQUIRE(descs.size() == 2);
+    CHECK(descs[0].shared_handle != nullptr);
+    CHECK(descs[1].shared_handle != nullptr);
+}

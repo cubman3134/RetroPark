@@ -4,6 +4,7 @@
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 #include <vector>
+#include <utility>
 
 namespace rp {
 class D3D11Backend : public IRenderBackend {
@@ -26,6 +27,35 @@ protected:
         Microsoft::WRL::ComPtr<IDXGIKeyedMutex> keyed;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
         void* handle = nullptr;
+
+        Surface() = default;
+        Surface(const Surface&) = delete;
+        Surface& operator=(const Surface&) = delete;
+        Surface(Surface&& o) noexcept
+            : tex(std::move(o.tex)), keyed(std::move(o.keyed)), srv(std::move(o.srv)),
+              handle(o.handle) {
+            o.handle = nullptr;
+        }
+        Surface& operator=(Surface&& o) noexcept {
+            if (this != &o) {
+                close_handle();
+                tex = std::move(o.tex);
+                keyed = std::move(o.keyed);
+                srv = std::move(o.srv);
+                handle = o.handle;
+                o.handle = nullptr;
+            }
+            return *this;
+        }
+        ~Surface() { close_handle(); }
+
+    private:
+        void close_handle() {
+            if (handle) {
+                ::CloseHandle(static_cast<HANDLE>(handle));
+                handle = nullptr;
+            }
+        }
     };
     Microsoft::WRL::ComPtr<ID3D11Device> device_;
     Microsoft::WRL::ComPtr<ID3D11Device1> device1_;
