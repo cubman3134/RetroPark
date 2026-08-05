@@ -74,3 +74,47 @@ TEST_CASE("d3d11: allocate_surfaces twice on the same backend does not crash") {
     CHECK(descs[0].shared_handle != nullptr);
     CHECK(descs[1].shared_handle != nullptr);
 }
+
+// AcquireSync returns WAIT_TIMEOUT (0x102) or WAIT_ABANDONED (0x80) on failure to
+// acquire, and both are POSITIVE HRESULT-shaped values, so SUCCEEDED()/FAILED()
+// macros misclassify them. This test proves the host correctly reports a timeout
+// (RP_ERR_TIMEOUT) instead of silently proceeding to render/present a frame it
+// never actually acquired.
+TEST_CASE("d3d11: composite times out cleanly when core holds the surface") {
+    if (!D3D11Backend::probe_shared_keyed_mutex()) {
+        WARN("environment lacks shared keyed-mutex support; skipping");
+        return;
+    }
+    D3D11Backend host;               // consumer (WARP, headless)
+    std::string err;
+    REQUIRE(host.initialize(nullptr, 8, 8, err) == RP_OK);
+
+    std::vector<rp_surface_desc> descs;
+    REQUIRE(host.allocate_surfaces(1, 8, 8, descs, err) == RP_OK);
+    REQUIRE(descs.size() == 1);
+    REQUIRE(descs[0].shared_handle != nullptr);
+
+    // A second WARP device stands in for the core: it opens the shared handle
+    // and takes key 0, then never releases it. The host's consumer-side
+    // AcquireSync(1, ...) can therefore never succeed.
+    ComPtr<ID3D11Device> pdev; ComPtr<ID3D11DeviceContext> pctx;
+    D3D_FEATURE_LEVEL fl;
+    REQUIRE(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
+        nullptr, 0, D3D11_SDK_VERSION, &pdev, &fl, &pctx)));
+    ComPtr<ID3D11Device1> pdev1; pdev.As(&pdev1);
+    ComPtr<ID3D11Texture2D> ptex;
+    REQUIRE(SUCCEEDED(pdev1->OpenSharedResource1(descs[0].shared_handle, IID_PPV_ARGS(&ptex))));
+    ComPtr<IDXGIKeyedMutex> pkm; ptex.As(&pkm);
+    REQUIRE(SUCCEEDED(pkm->AcquireSync(0, 100)));   // core takes key 0 and holds it
+
+    // Host's compositor tries to acquire key 1 for the "ready" surface; it must
+    // time out (key 1 is never released while the core holds key 0) and the
+    // backend must report RP_ERR_TIMEOUT rather than proceeding as if it had
+    // acquired the surface.
+    std::vector<uint8_t> out_rgba(8 * 8 * 4, 0);
+    rp_result r = host.composite_and_present(0, /*has_frame=*/true, out_rgba.data(), err);
+    CHECK(r == RP_ERR_TIMEOUT);
+
+    // Clean up: release the producer's key so the shared resource tears down cleanly.
+    REQUIRE(SUCCEEDED(pkm->ReleaseSync(1)));
+}

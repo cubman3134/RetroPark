@@ -34,7 +34,8 @@ struct RefCore {
             if (!slots.empty()) {
                 Slot& s = slots[cursor];
                 cursor = (cursor + 1) % (uint32_t)slots.size();
-                if (SUCCEEDED(s.keyed->AcquireSync(0, 100))) {
+                HRESULT hr = s.keyed->AcquireSync(0, 100);
+                if (hr == S_OK) {
                     float t = (float)((frame++ % 120)) / 120.0f;   // animate
                     const float col[4] = { 0.0f, 1.0f, t, 1.0f };  // green with rising blue
                     ctx->ClearRenderTargetView(s.rtv.Get(), col);
@@ -42,6 +43,8 @@ struct RefCore {
                     s.keyed->ReleaseSync(1);
                     host.submit_frame(host.host, s.index, s.generation);
                 }
+                // hr == WAIT_TIMEOUT or WAIT_ABANDONED: did not acquire this tick;
+                // skip cleanly (no clear/release/submit) and try again next loop.
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(16));
         }

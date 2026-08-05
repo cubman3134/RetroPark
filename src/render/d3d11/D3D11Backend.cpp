@@ -86,7 +86,8 @@ rp_result D3D11Backend::readback_surface_pixel(uint32_t index, uint32_t x, uint3
                                                uint8_t rgba_out[4], std::string& err) {
     if (index >= surfaces_.size()) { err = "bad index"; return RP_ERR_BAD_ARG; }
     Surface& s = surfaces_[index];
-    if (FAILED(s.keyed->AcquireSync(1, 100))) { err = "acquire timeout"; return RP_ERR_TIMEOUT; }
+    HRESULT acq_hr = s.keyed->AcquireSync(1, 100);
+    if (acq_hr != S_OK) { err = "acquire timeout"; return RP_ERR_TIMEOUT; }
 
     D3D11_TEXTURE2D_DESC sd{};
     sd.Width = width_; sd.Height = height_; sd.MipLevels = 1; sd.ArraySize = 1;
@@ -129,7 +130,8 @@ rp_result D3D11Backend::composite_and_present(uint32_t ready_index, bool has_fra
     ID3D11ShaderResourceView* core_srv = nullptr;
     bool acquired = false;
     if (has_frame && ready_index < surfaces_.size()) {
-        if (FAILED(surfaces_[ready_index].keyed->AcquireSync(1, 100))) { err="acquire timeout"; return RP_ERR_TIMEOUT; }
+        HRESULT acq_hr = surfaces_[ready_index].keyed->AcquireSync(1, 100);
+        if (acq_hr != S_OK) { err="acquire timeout"; return RP_ERR_TIMEOUT; }
         acquired = true;
         core_srv = surfaces_[ready_index].srv.Get();
     }
