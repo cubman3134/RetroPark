@@ -72,16 +72,139 @@ bool VulkanBackend::probe_vulkan_shared() {
     return ok;   // destructor tears down
 }
 
-rp_result VulkanBackend::allocate_surfaces(uint32_t, uint32_t, uint32_t,
-                                           std::vector<rp_surface_desc>&, std::string& err) {
-    err="allocate_surfaces not implemented until Task 4"; return RP_ERR_UNSUPPORTED;
+static bool find_mem_type(VkPhysicalDevice phys, uint32_t type_bits,
+                          VkMemoryPropertyFlags props, uint32_t& out) {
+    VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(phys, &mp);
+    for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)
+        if ((type_bits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & props) == props) { out = i; return true; }
+    return false;
+}
+
+// Release a surface batch (and the timeline) in reverse order, closing every
+// owned NT handle exactly once. Safe to call with partially-built surfaces.
+void VulkanBackend::destroy_surfaces() {
+    if (device_) vkDeviceWaitIdle(device_);
+    for (auto it = surfaces_.rbegin(); it != surfaces_.rend(); ++it) {
+        if (it->view)  vkDestroyImageView(device_, it->view, nullptr);
+        if (it->image) vkDestroyImage(device_, it->image, nullptr);
+        if (it->mem)   vkFreeMemory(device_, it->mem, nullptr);
+        if (it->handle) CloseHandle(static_cast<HANDLE>(it->handle));
+    }
+    surfaces_.clear();
+    if (timeline_) { vkDestroySemaphore(device_, timeline_, nullptr); timeline_ = VK_NULL_HANDLE; }
+    if (sync_handle_) { CloseHandle(static_cast<HANDLE>(sync_handle_)); sync_handle_ = nullptr; }
+}
+
+rp_result VulkanBackend::allocate_surfaces(uint32_t count, uint32_t w, uint32_t h,
+                                           std::vector<rp_surface_desc>& out, std::string& err) {
+    if (!device_) { err = "device not initialized"; return RP_ERR_INTERNAL; }
+    if (count == 0) { err = "count must be > 0"; return RP_ERR_BAD_ARG; }
+
+    // Free/close any prior batch first so re-allocation never double-closes a handle.
+    destroy_surfaces();
+
+    auto pfnGetMemHandle = reinterpret_cast<PFN_vkGetMemoryWin32HandleKHR>(
+        vkGetDeviceProcAddr(device_, "vkGetMemoryWin32HandleKHR"));
+    auto pfnGetSemHandle = reinterpret_cast<PFN_vkGetSemaphoreWin32HandleKHR>(
+        vkGetDeviceProcAddr(device_, "vkGetSemaphoreWin32HandleKHR"));
+    if (!pfnGetMemHandle || !pfnGetSemHandle) { err = "load vkGet*Win32HandleKHR"; return RP_ERR_DEVICE; }
+
+    const VkFormat kFmt = VK_FORMAT_R8G8B8A8_UNORM;
+    const VkImageUsageFlags kUsage =
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+
+    out.clear();
+    surfaces_.reserve(count);
+    width_ = w; height_ = h;
+
+    for (uint32_t i = 0; i < count; ++i) {
+        surfaces_.push_back(VkSurface{});
+        VkSurface& s = surfaces_.back();   // pushed early so a partial failure is torn down by dtor
+
+        VkExternalMemoryImageCreateInfo emici{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
+        emici.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+
+        VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        ici.pNext = &emici;
+        ici.imageType = VK_IMAGE_TYPE_2D;
+        ici.format = kFmt;
+        ici.extent = {w, h, 1};
+        ici.mipLevels = 1;
+        ici.arrayLayers = 1;
+        ici.samples = VK_SAMPLE_COUNT_1_BIT;
+        ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage = kUsage;
+        ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VK_CHECK(vkCreateImage(device_, &ici, nullptr, &s.image), err, "vkCreateImage");
+
+        VkMemoryRequirements req; vkGetImageMemoryRequirements(device_, s.image, &req);
+        uint32_t typeIndex = 0;
+        if (!find_mem_type(phys_, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, typeIndex)) {
+            err = "no device-local memory type for shared image"; return RP_ERR_DEVICE;
+        }
+
+        VkMemoryDedicatedAllocateInfo dai{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
+        dai.image = s.image;
+        VkExportMemoryAllocateInfo emai{VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO};
+        emai.pNext = &dai;
+        emai.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        mai.pNext = &emai;
+        mai.allocationSize = req.size;
+        mai.memoryTypeIndex = typeIndex;
+        VK_CHECK(vkAllocateMemory(device_, &mai, nullptr, &s.mem), err, "vkAllocateMemory");
+        VK_CHECK(vkBindImageMemory(device_, s.image, s.mem, 0), err, "vkBindImageMemory");
+
+        VkMemoryGetWin32HandleInfoKHR ghi{VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR};
+        ghi.memory = s.mem;
+        ghi.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        HANDLE mh = nullptr;
+        VK_CHECK(pfnGetMemHandle(device_, &ghi, &mh), err, "vkGetMemoryWin32HandleKHR");
+        s.handle = mh;   // owned; closed in destroy_surfaces()
+
+        VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vci.image = s.image;
+        vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vci.format = kFmt;
+        vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        VK_CHECK(vkCreateImageView(device_, &vci, nullptr, &s.view), err, "vkCreateImageView");
+
+        rp_surface_desc d{};
+        d.index = i; d.width = w; d.height = h;
+        d.format = RP_FMT_R8G8B8A8_UNORM;
+        d.shared_handle = s.handle;
+        d.generation = 0;
+        out.push_back(d);
+    }
+
+    // One exported shared timeline semaphore, initial value 0.
+    VkSemaphoreTypeCreateInfo stci{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+    stci.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    stci.initialValue = 0;
+    VkExportSemaphoreCreateInfo esci{VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO};
+    esci.pNext = &stci;
+    esci.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    sci.pNext = &esci;
+    VK_CHECK(vkCreateSemaphore(device_, &sci, nullptr, &timeline_), err, "vkCreateSemaphore");
+
+    VkSemaphoreGetWin32HandleInfoKHR sgi{VK_STRUCTURE_TYPE_SEMAPHORE_GET_WIN32_HANDLE_INFO_KHR};
+    sgi.semaphore = timeline_;
+    sgi.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    HANDLE sh = nullptr;
+    VK_CHECK(pfnGetSemHandle(device_, &sgi, &sh), err, "vkGetSemaphoreWin32HandleKHR");
+    sync_handle_ = sh;   // owned; closed in destroy_surfaces()
+
+    return RP_OK;
 }
 rp_result VulkanBackend::composite_and_present(uint32_t, uint64_t, bool, uint8_t*, std::string& err) {
     err="composite not implemented until Task 5"; return RP_ERR_UNSUPPORTED;
 }
 
 VulkanBackend::~VulkanBackend() {
-    if (device_) { vkDeviceWaitIdle(device_); vkDestroyDevice(device_, nullptr); }
+    if (device_) { vkDeviceWaitIdle(device_); destroy_surfaces(); vkDestroyDevice(device_, nullptr); }
     if (instance_) vkDestroyInstance(instance_, nullptr);
 }
 }

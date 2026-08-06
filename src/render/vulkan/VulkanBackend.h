@@ -19,13 +19,27 @@ public:
 
 protected:
     rp_result create_instance_and_device(std::string& err);
+    void destroy_surfaces();         // free/close a surface batch (reverse order)
+
+    // One exported shared image slot: the VkImage lives on device_, its backing
+    // VkDeviceMemory is exported as an opaque-Win32 NT handle that another
+    // VkDevice (or D3D) can import. `handle` is owned and CloseHandle'd once.
+    struct VkSurface {
+        VkImage        image  = VK_NULL_HANDLE;
+        VkDeviceMemory mem    = VK_NULL_HANDLE;
+        VkImageView    view   = VK_NULL_HANDLE;
+        void*          handle = nullptr;   // exported NT handle (owned)
+    };
+
     VkInstance instance_ = VK_NULL_HANDLE;
     VkPhysicalDevice phys_ = VK_NULL_HANDLE;
     VkDevice device_ = VK_NULL_HANDLE;
     uint32_t queue_family_ = 0;
     VkQueue queue_ = VK_NULL_HANDLE;
     uint8_t device_uuid_[16] = {0};
-    void* sync_handle_ = nullptr;    // set in Task 4
+    std::vector<VkSurface> surfaces_;        // exported shared image ring
+    VkSemaphore timeline_ = VK_NULL_HANDLE;  // exported shared timeline semaphore
+    void* sync_handle_ = nullptr;            // exported NT handle for timeline_ (owned)
     uint32_t width_ = 0, height_ = 0;
 };
 }
