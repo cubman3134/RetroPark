@@ -20,6 +20,9 @@ public:
 
 protected:
     rp_result create_instance_and_device(std::string& err);
+    rp_result create_swapchain(void* native_window, std::string& err);   // (re)create surface + swapchain
+    void destroy_swapchain();        // reverse-order teardown of swapchain views/swapchain/surface
+    rp_result present_windowed(uint32_t ready_index, uint64_t sync_value, bool has_frame, std::string& err);
     void destroy_surfaces();         // free/close a surface batch (reverse order)
     rp_result ensure_composite_resources(std::string& err);   // lazy: compositor + offscreen + staging + cmd/fence
     void destroy_composite();        // reverse-order teardown of the composite resources
@@ -56,5 +59,23 @@ protected:
     VkCommandPool composite_pool_ = VK_NULL_HANDLE;
     VkCommandBuffer composite_cmd_ = VK_NULL_HANDLE;
     VkFence composite_fence_ = VK_NULL_HANDLE;
+
+    // Windowed present path (created when initialize() gets a non-null native_window).
+    // The surface is destroyed with the instance still alive; swapchain + its views
+    // are torn down before the surface, in reverse order of creation.
+    VkSurfaceKHR   swap_surface_ = VK_NULL_HANDLE;
+    VkSwapchainKHR swapchain_    = VK_NULL_HANDLE;
+    VkFormat       swap_format_  = VK_FORMAT_UNDEFINED;
+    VkExtent2D     swap_extent_  = {0, 0};
+    std::vector<VkImage>     swap_images_;   // owned by the swapchain (not destroyed)
+    std::vector<VkImageView> swap_views_;    // owned by us
+    std::vector<VkSemaphore> present_sems_;  // one per swap image: composite signals, present waits
+    VkSemaphore    acquire_sem_ = VK_NULL_HANDLE;   // binary: acquire signals, composite waits
+    // Highest producer sync_value already consumed via the timeline handoff. The
+    // windowed present loop runs faster than the core produces, so it re-presents the
+    // same ready frame repeatedly; the QFOT acquire + timeline wait/signal must fire
+    // exactly ONCE per producer value (signalling 2f+1 twice would break the strictly
+    // increasing timeline). Reset to 0 whenever the timeline is recreated.
+    uint64_t       last_present_sync_ = 0;
 };
 }
