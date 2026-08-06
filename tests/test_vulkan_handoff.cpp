@@ -169,34 +169,39 @@ bool vk_test_producer_clear(void* mem_handle, void* sem_handle,
         isi.handle = static_cast<HANDLE>(sem_handle);   // host retains ownership of the NT handle
         if (pfnImportSem(dev, &isi) != VK_SUCCESS) { why = "producer vkImportSemaphoreWin32HandleKHR"; break; }
 
-        // --- record: UNDEFINED->TRANSFER_DST, clear red, release to EXTERNAL as GENERAL ---
+        // --- record: UNDEFINED->GENERAL, clear red, release to EXTERNAL as GENERAL ---
+        // The shared image lives in GENERAL for its whole life so the QFOT carries no
+        // layout change (release and acquire halves must specify identical layouts, and
+        // validation can't catch a mismatch that straddles two VkDevices).
         VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
         pci.queueFamilyIndex = qfam;
         if (vkCreateCommandPool(dev, &pci, nullptr, &pool) != VK_SUCCESS) { why = "producer vkCreateCommandPool"; break; }
         VkCommandBufferAllocateInfo cbai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
         cbai.commandPool = pool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbai.commandBufferCount = 1;
-        VkCommandBuffer cb; vkAllocateCommandBuffers(dev, &cbai, &cb);
+        VkCommandBuffer cb = VK_NULL_HANDLE; REQUIRE(vkAllocateCommandBuffers(dev, &cbai, &cb) == VK_SUCCESS);
         VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vkBeginCommandBuffer(cb, &bi);
 
+        // Plain (non-QFOT) transition to GENERAL within this device before the clear.
         VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        VkImageMemoryBarrier toDst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-        toDst.srcAccessMask = 0; toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        toDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        toDst.image = img; toDst.subresourceRange = range;
+        VkImageMemoryBarrier toGeneral{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        toGeneral.srcAccessMask = 0; toGeneral.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        toGeneral.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; toGeneral.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        toGeneral.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; toGeneral.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toGeneral.image = img; toGeneral.subresourceRange = range;
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             0, 0, nullptr, 0, nullptr, 1, &toDst);
+                             0, 0, nullptr, 0, nullptr, 1, &toGeneral);
 
         VkClearColorValue cc{}; std::memcpy(cc.float32, color, sizeof(float) * 4);
-        vkCmdClearColorImage(cb, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &cc, 1, &range);
+        vkCmdClearColorImage(cb, img, VK_IMAGE_LAYOUT_GENERAL, &cc, 1, &range);
 
-        // Release ownership to the external (host) queue family; the host acquires
-        // from EXTERNAL with a matching old layout to preserve the cleared contents.
+        // Release ownership to the external (host) queue family with NO layout change
+        // (GENERAL->GENERAL); the host's acquire half specifies the identical layouts so
+        // the QFOT is spec-correct and the cleared contents are preserved.
         VkImageMemoryBarrier release{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         release.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; release.dstAccessMask = 0;
-        release.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; release.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        release.oldLayout = VK_IMAGE_LAYOUT_GENERAL; release.newLayout = VK_IMAGE_LAYOUT_GENERAL;
         release.srcQueueFamilyIndex = qfam; release.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL_KHR;
         release.image = img; release.subresourceRange = range;
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
@@ -226,8 +231,8 @@ bool vk_test_producer_clear(void* mem_handle, void* sem_handle,
 }
 
 // Host-side readback: wait the timeline >= wait_value (1s CPU timeout), then acquire
-// the image from the EXTERNAL family (matching GENERAL layout) and copy pixel (x,y)
-// out through a host-visible staging buffer. Returns the RGBA bytes in `rgba`.
+// the image from the EXTERNAL family (GENERAL->GENERAL, no layout change) and copy
+// pixel (x,y) out through a host-visible staging buffer. Returns the RGBA bytes in `rgba`.
 bool vk_host_readback(TestVk& host, uint32_t w, uint32_t h, uint64_t wait_value,
                       uint8_t rgba[4], std::string& why) {
     VkDevice dev = host.dev();
@@ -260,24 +265,25 @@ bool vk_host_readback(TestVk& host, uint32_t w, uint32_t h, uint64_t wait_value,
         VkMemoryAllocateInfo bmai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         bmai.allocationSize = breq.size; bmai.memoryTypeIndex = bt;
         if (vkAllocateMemory(dev, &bmai, nullptr, &stagingMem) != VK_SUCCESS) { why = "host staging vkAllocateMemory"; break; }
-        vkBindBufferMemory(dev, staging, stagingMem, 0);
+        REQUIRE(vkBindBufferMemory(dev, staging, stagingMem, 0) == VK_SUCCESS);
 
         VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
         pci.queueFamilyIndex = host.qfam();
         if (vkCreateCommandPool(dev, &pci, nullptr, &pool) != VK_SUCCESS) { why = "host vkCreateCommandPool"; break; }
         VkCommandBufferAllocateInfo cbai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
         cbai.commandPool = pool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbai.commandBufferCount = 1;
-        VkCommandBuffer cb; vkAllocateCommandBuffers(dev, &cbai, &cb);
+        VkCommandBuffer cb = VK_NULL_HANDLE; REQUIRE(vkAllocateCommandBuffers(dev, &cbai, &cb) == VK_SUCCESS);
         VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vkBeginCommandBuffer(cb, &bi);
 
-        // Acquire from the EXTERNAL family; old layout GENERAL matches the producer's
-        // release so the cleared contents survive the transition to TRANSFER_SRC.
+        // Acquire from the EXTERNAL family with NO layout change (GENERAL->GENERAL),
+        // identical to the producer's release half; the copy then reads the image as
+        // GENERAL, which vkCmdCopyImageToBuffer accepts.
         VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         VkImageMemoryBarrier acquire{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         acquire.srcAccessMask = 0; acquire.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        acquire.oldLayout = VK_IMAGE_LAYOUT_GENERAL; acquire.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        acquire.oldLayout = VK_IMAGE_LAYOUT_GENERAL; acquire.newLayout = VK_IMAGE_LAYOUT_GENERAL;
         acquire.srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL_KHR; acquire.dstQueueFamilyIndex = host.qfam();
         acquire.image = host.image(0); acquire.subresourceRange = range;
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -286,7 +292,7 @@ bool vk_host_readback(TestVk& host, uint32_t w, uint32_t h, uint64_t wait_value,
         VkBufferImageCopy region{};
         region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         region.imageExtent = {w, h, 1};
-        vkCmdCopyImageToBuffer(cb, host.image(0), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1, &region);
+        vkCmdCopyImageToBuffer(cb, host.image(0), VK_IMAGE_LAYOUT_GENERAL, staging, 1, &region);
         vkEndCommandBuffer(cb);
 
         // Queue-wait on the timeline too: pairs the QFOT acquire and establishes the
