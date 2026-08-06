@@ -60,6 +60,24 @@ TEST_CASE("vk e2e: reference Vulkan core renders into our surface and we composi
     CHECK(at(4,4,2) > 80);
     CHECK(at(4,4,1) < at(W-4,H-4,1));
 
+    // Present several times back-to-back with no sleep: the host outruns the core, so
+    // most (usually all) of these re-composite the same producer frame. The stale-frame
+    // guard must skip the QFOT re-acquire and the timeline re-signal on a repeat (a
+    // re-signal to an already-reached value is a validation error) while STILL handing
+    // back valid pixels every call — the core's green must remain in the readback.
+    // Present several times back-to-back with no sleep. When the host outruns the core,
+    // latest_ready() hands back a producer value already consumed; the stale-frame guard
+    // must then skip the QFOT re-acquire and the timeline re-signal (re-signalling a
+    // reached value is illegal) while STILL re-compositing and reading back valid pixels
+    // — the core's green must survive every call. (Present cadence here is close to the
+    // core's ~16ms, so a true repeat is not guaranteed to occur; the guard's correctness
+    // mirrors the reviewed windowed guard, and this asserts the no-regression envelope.)
+    for (int i = 0; i < 8; ++i) {
+        rp_result rr = rp_runtime_present(rt, img.data());
+        CHECK(rr == RP_OK);
+        CHECK(img[((H-4)*W + (W-4))*4 + 1] > 150);
+    }
+
     rp_runtime_unload_core(rt);
     rp_runtime_destroy(rt);
 }

@@ -427,6 +427,15 @@ rp_result VulkanBackend::composite_and_present(uint32_t ready_index, uint64_t sy
 
     if (swapchain_) return present_windowed(ready_index, sync_value, has_frame, err);
 
+    // The host may call present() faster than the core produces, so latest_ready()
+    // keeps returning the same frame. Only the FIRST composite of a given producer
+    // value performs the cross-queue QFOT acquire and advances the timeline (wait
+    // sync_value / signal sync_value+1); a repeat still re-composites and reads back
+    // the image we already own (so the caller always gets valid pixels) but must not
+    // re-acquire it or re-signal the timeline to a value it already reached. Mirrors
+    // the windowed guard so both present paths are single-acquire / single-signal.
+    const bool new_frame = has_frame && (sync_value > last_present_sync_);
+
     VK_CHECK(vkResetFences(device_, 1, &composite_fence_), err, "reset composite fence");
     VK_CHECK(vkResetCommandBuffer(composite_cmd_, 0), err, "reset composite cmd");
 
@@ -438,8 +447,9 @@ rp_result VulkanBackend::composite_and_present(uint32_t ready_index, uint64_t sy
 
     // Acquire ownership of the core's shared image from the external queue family. No
     // layout change (GENERAL->GENERAL): the shared images live in GENERAL for their
-    // whole life, and the compositor's descriptor samples them in GENERAL too.
-    if (has_frame) {
+    // whole life, and the compositor's descriptor samples them in GENERAL too. Only on
+    // a new frame: a repeat already owns the image and must not re-acquire it.
+    if (new_frame) {
         VkImageMemoryBarrier acquire{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         acquire.srcAccessMask = 0;
         acquire.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
@@ -480,13 +490,15 @@ rp_result VulkanBackend::composite_and_present(uint32_t ready_index, uint64_t sy
     VK_CHECK(vkEndCommandBuffer(composite_cmd_), err, "end composite cmd");
 
     // Wait the shared timeline >= sync_value (the core's producer signal) before the
-    // GPU touches its image, and signal sync_value+1 once this composite is done.
+    // GPU touches its image, and signal sync_value+1 once this composite is done. Only
+    // on a new frame: a repeat re-samples the already-owned image and must leave the
+    // timeline strictly increasing (re-signalling a reached value is illegal).
     uint64_t waitValue = sync_value, signalValue = sync_value + 1;
     VkTimelineSemaphoreSubmitInfo tssi{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1; si.pCommandBuffers = &composite_cmd_;
-    if (has_frame) {
+    if (new_frame) {
         tssi.waitSemaphoreValueCount = 1; tssi.pWaitSemaphoreValues = &waitValue;
         tssi.signalSemaphoreValueCount = 1; tssi.pSignalSemaphoreValues = &signalValue;
         si.pNext = &tssi;
@@ -508,6 +520,7 @@ rp_result VulkanBackend::composite_and_present(uint32_t ready_index, uint64_t sy
                        src + static_cast<size_t>(y) * width_ * 4, static_cast<size_t>(width_) * 4);
         vkUnmapMemory(device_, staging_mem_);
     }
+    if (new_frame) last_present_sync_ = sync_value;   // consumed exactly once
     return RP_OK;
 }
 

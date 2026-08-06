@@ -137,6 +137,10 @@ struct RefCoreVk {
                 record_frame(s, color);
 
                 const uint64_t signalVal = 2 * f;
+                // INVARIANT: deadlock-free only while host present rate >= core produce
+                // rate. The consumer composites latest_ready and may skip frames; if the
+                // core outran the host it would wait here on an odd value the consumer
+                // skipped, bounded by (not hung past) the 1s fence timeout above.
                 const uint64_t waitVal   = (f > count) ? (2 * (f - count) + 1) : 0;
                 const bool     doWait    = (f > count);
 

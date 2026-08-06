@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#define RETROPARK_ABI_VERSION 1u
+#define RETROPARK_ABI_VERSION 2u
 #define RP_CORE_ABI_EXPORT_NAME "rp_get_core_abi"
 
 typedef enum rp_result {

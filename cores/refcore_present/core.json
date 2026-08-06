@@ -2,7 +2,7 @@
   "id": "refcore_present",
   "name": "Reference Presenting Core",
   "type": "presenting",
-  "abi_version": 1,
+  "abi_version": 2,
   "graphics_api": "d3d11",
   "entry": "refcore_present.dll"
 }
