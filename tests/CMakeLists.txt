@@ -15,7 +15,8 @@ add_executable(retropark_tests
   test_shader_embed.cpp
   test_vulkan_device.cpp
   test_vulkan_handoff.cpp
-  test_vulkan_compositor.cpp)
+  test_vulkan_compositor.cpp
+  test_vulkan_e2e.cpp)
 target_link_libraries(retropark_tests PRIVATE retropark doctest::doctest nlohmann_json::nlohmann_json)
 target_include_directories(retropark_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
@@ -37,3 +38,10 @@ add_subdirectory(mock_core)
 add_dependencies(retropark_tests refcore_present)
 target_compile_definitions(retropark_tests PRIVATE
   RP_CORE_DIR="$<TARGET_FILE_DIR:refcore_present>/cores/refcore_present")
+
+# vk e2e test loads the real reference Vulkan presenting core built by
+# cores/refcore_present_vk; depend on it and tell the test where its DLL +
+# core.json land (absolute path via generator expression).
+add_dependencies(retropark_tests refcore_present_vk)
+target_compile_definitions(retropark_tests PRIVATE
+  RP_VK_CORE_DIR="$<TARGET_FILE_DIR:refcore_present_vk>/cores/refcore_present_vk")
