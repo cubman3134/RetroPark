@@ -10,9 +10,16 @@ add_executable(retropark_tests
   test_d3d11_handoff.cpp
   test_compositor.cpp
   test_runtime_api.cpp
-  test_e2e.cpp)
+  test_e2e.cpp
+  test_shader_embed.cpp)
 target_link_libraries(retropark_tests PRIVATE retropark doctest::doctest nlohmann_json::nlohmann_json)
 target_include_directories(retropark_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+set(PROBE_HDR "${CMAKE_CURRENT_BINARY_DIR}/gen/probe_vert_generated.h")
+retropark_embed_shader("${CMAKE_CURRENT_SOURCE_DIR}/shaders/probe.vert" vert "${PROBE_HDR}" probe_vert)
+add_custom_target(gen_probe_shader DEPENDS "${PROBE_HDR}")
+add_dependencies(retropark_tests gen_probe_shader)
+target_include_directories(retropark_tests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/gen")
 add_test(NAME retropark_tests COMMAND retropark_tests)
 set_tests_properties(retropark_tests PROPERTIES WORKING_DIRECTORY $<TARGET_FILE_DIR:retropark_tests>)
 

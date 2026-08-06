@@ -9,6 +9,8 @@ if (MSVC)
   add_compile_options(/W4 /permissive-)
 endif()
 
+include(cmake/Shaders.cmake)
+
 include(FetchContent)
 # doctest v2.4.11 and nlohmann_json v3.11.3 both declare a cmake_minimum_required
 # below 3.5, which CMake >= 4.0 refuses to configure. This policy floor (as
@@ -36,6 +38,7 @@ target_include_directories(retropark PUBLIC include)
 target_include_directories(retropark PRIVATE src)
 target_compile_features(retropark PUBLIC cxx_std_17)
 target_link_libraries(retropark PUBLIC nlohmann_json::nlohmann_json)
+target_link_libraries(retropark PUBLIC Vulkan::Vulkan)
 if (WIN32)
   target_link_libraries(retropark PUBLIC d3d11 dxgi dxguid d3dcompiler)
 endif()
