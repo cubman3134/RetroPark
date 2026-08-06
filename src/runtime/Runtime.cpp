@@ -65,6 +65,7 @@ rp_result Runtime::rebuild_surfaces(std::string& err) {
 }
 
 rp_result Runtime::resize(uint32_t w, uint32_t h) {
+    if (!backend_) return RP_ERR_DEVICE;
     width_ = w; height_ = h;
     std::string err;
     if (!core_loaded_) {
@@ -127,6 +128,7 @@ rp_result Runtime::unload_core() {
 }
 
 rp_result Runtime::present(uint8_t* out_rgba) {
+    if (!backend_) return RP_ERR_DEVICE;
     uint32_t idx = 0; uint64_t sv = 0;
     bool has = ring_.latest_ready(idx, sv);
     std::string err;
