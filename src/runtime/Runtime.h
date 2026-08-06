@@ -6,7 +6,7 @@
 #include "loader/CoreLoader.h"
 #include "loader/Win32CoreModule.h"
 #include "render/SurfaceRing.h"
-#include "render/d3d11/D3D11Backend.h"
+#include "render/IRenderBackend.h"
 
 namespace rp {
 class Runtime {
@@ -27,7 +27,8 @@ private:
     rp_result rebuild_surfaces(std::string& err);
 
     void* native_window_ = nullptr;
-    std::unique_ptr<D3D11Backend> backend_;
+    rp_graphics_api api_;
+    std::unique_ptr<IRenderBackend> backend_;
     std::unique_ptr<Win32CoreModule> module_;
     CoreLoader loader_;
     SurfaceRing ring_{3};

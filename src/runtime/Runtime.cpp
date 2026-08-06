@@ -1,4 +1,5 @@
 #include "runtime/Runtime.h"
+#include "runtime/BackendFactory.h"
 #include "loader/Manifest.h"
 #include <fstream>
 #include <sstream>
@@ -14,8 +15,12 @@ static void host_input(rp_host* h, rp_input_state* out) {
     reinterpret_cast<Runtime*>(h)->on_input(out);
 }
 
-Runtime::Runtime(rp_graphics_api, void* native_window) : native_window_(native_window) {
-    backend_ = std::make_unique<D3D11Backend>();
+Runtime::Runtime(rp_graphics_api api, void* native_window) : native_window_(native_window), api_(api) {
+    backend_ = make_backend(api_);
+    if (!backend_) {
+        init_ok_ = false;
+        return;
+    }
     std::string err;
     init_ok_ = (backend_->initialize(native_window_, width_, height_, err) == RP_OK);
     host_iface_.host = reinterpret_cast<rp_host*>(this);
@@ -85,7 +90,7 @@ rp_result Runtime::load_core(const std::string& core_dir) {
     CoreManifest m; std::string err;
     if (parse_manifest(ss.str(), m, err) != RP_OK) return RP_ERR_BAD_ARG;
     if (m.type != RP_CORE_PRESENTING) return RP_ERR_UNSUPPORTED; // driven not in Slice A
-    if (m.graphics_api != RP_GFX_D3D11) return RP_ERR_UNSUPPORTED; // only d3d11 in Slice A
+    if (m.graphics_api != api_) return RP_ERR_UNSUPPORTED; // core must match runtime's backend api
 
     std::string dll = core_dir + "/" + m.entry;
     if (Win32CoreModule::open(dll, module_, err) != RP_OK) return RP_ERR_NOT_FOUND;

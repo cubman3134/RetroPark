@@ -10,6 +10,7 @@ add_executable(retropark_tests
   test_d3d11_handoff.cpp
   test_compositor.cpp
   test_runtime_api.cpp
+  test_backend_factory.cpp
   test_e2e.cpp
   test_shader_embed.cpp
   test_vulkan_device.cpp
