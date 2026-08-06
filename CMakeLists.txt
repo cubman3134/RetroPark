@@ -33,6 +33,7 @@ add_library(retropark STATIC
 target_sources(retropark PRIVATE
   src/render/d3d11/D3D11Backend.cpp
   src/render/d3d11/D3D11Compositor.cpp
+  src/render/vulkan/VulkanBackend.cpp
   src/runtime/Runtime.cpp)
 target_include_directories(retropark PUBLIC include)
 target_include_directories(retropark PRIVATE src)
