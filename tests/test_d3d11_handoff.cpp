@@ -112,7 +112,7 @@ TEST_CASE("d3d11: composite times out cleanly when core holds the surface") {
     // backend must report RP_ERR_TIMEOUT rather than proceeding as if it had
     // acquired the surface.
     std::vector<uint8_t> out_rgba(8 * 8 * 4, 0);
-    rp_result r = host.composite_and_present(0, /*has_frame=*/true, out_rgba.data(), err);
+    rp_result r = host.composite_and_present(0, /*sync_value=*/0, /*has_frame=*/true, out_rgba.data(), err);
     CHECK(r == RP_ERR_TIMEOUT);
 
     // Clean up: release the producer's key so the shared resource tears down cleanly.

@@ -41,7 +41,7 @@ struct RefCore {
                     ctx->ClearRenderTargetView(s.rtv.Get(), col);
                     ctx->Flush();
                     s.keyed->ReleaseSync(1);
-                    host.submit_frame(host.host, s.index, s.generation);
+                    host.submit_frame(host.host, s.index, s.generation, /*sync_value=*/0);
                 }
                 // hr == WAIT_TIMEOUT or WAIT_ABANDONED: did not acquire this tick;
                 // skip cleanly (no clear/release/submit) and try again next loop.
@@ -74,12 +74,13 @@ void ref_destroy(rp_core* core) {
     delete c;
 }
 
-rp_result ref_set_surfaces(rp_core* core, const rp_surface_desc* descs, uint32_t count) {
+rp_result ref_set_surfaces(rp_core* core, const rp_surface_set* set) {
     auto* c = reinterpret_cast<RefCore*>(core);
     c->slots.clear();
-    for (uint32_t i = 0; i < count; ++i) {
-        Slot s; s.index = descs[i].index; s.generation = descs[i].generation;
-        if (FAILED(c->dev1->OpenSharedResource1((HANDLE)descs[i].shared_handle, IID_PPV_ARGS(&s.tex))))
+    for (uint32_t i = 0; i < set->count; ++i) {
+        const rp_surface_desc& d = set->surfaces[i];
+        Slot s; s.index = d.index; s.generation = d.generation;
+        if (FAILED(c->dev1->OpenSharedResource1((HANDLE)d.shared_handle, IID_PPV_ARGS(&s.tex))))
             return RP_ERR_DEVICE;
         if (FAILED(s.tex.As(&s.keyed))) return RP_ERR_DEVICE;
         if (FAILED(c->dev->CreateRenderTargetView(s.tex.Get(), nullptr, &s.rtv))) return RP_ERR_DEVICE;

@@ -24,7 +24,9 @@ TEST_CASE("ffi: load real mock core dll through the full lifecycle") {
     rp_host_iface host{};
     CHECK(ld.create(&host, err) == RP_OK);
     rp_surface_desc d[3] = {};
-    CHECK(ld.set_surfaces(d, 3, err) == RP_OK);
+    rp_surface_set set{};
+    set.count = 3; set.surfaces = d;
+    CHECK(ld.set_surfaces(&set, err) == RP_OK);
     CHECK(ld.start(err) == RP_OK);
     CHECK(ld.stop(err) == RP_OK);
     ld.destroy();

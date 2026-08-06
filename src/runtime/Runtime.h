@@ -20,7 +20,7 @@ public:
     rp_result present(uint8_t* out_rgba);
 
     // Host-iface trampolines.
-    void on_submit(uint32_t index, uint64_t generation);
+    void on_submit(uint32_t index, uint64_t generation, uint64_t sync_value);
     void on_input(rp_input_state* out);
 
 private:

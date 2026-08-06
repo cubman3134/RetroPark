@@ -17,8 +17,8 @@ void mock_get_info(rp_core_info* out) {
 }
 rp_core* mock_create(const rp_host_iface*) { return reinterpret_cast<rp_core*>(new MockCore()); }
 void mock_destroy(rp_core* c) { delete reinterpret_cast<MockCore*>(c); }
-rp_result mock_set_surfaces(rp_core* c, const rp_surface_desc*, uint32_t n) {
-    reinterpret_cast<MockCore*>(c)->surfaces = n; return RP_OK;
+rp_result mock_set_surfaces(rp_core* c, const rp_surface_set* set) {
+    reinterpret_cast<MockCore*>(c)->surfaces = set->count; return RP_OK;
 }
 rp_result mock_start(rp_core* c) { reinterpret_cast<MockCore*>(c)->started = 1; return RP_OK; }
 rp_result mock_stop(rp_core* c) { reinterpret_cast<MockCore*>(c)->started = 0; return RP_OK; }

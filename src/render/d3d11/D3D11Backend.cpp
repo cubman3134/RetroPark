@@ -141,8 +141,9 @@ rp_result D3D11Backend::readback_surface_pixel(uint32_t index, uint32_t x, uint3
     return RP_OK;
 }
 
-rp_result D3D11Backend::composite_and_present(uint32_t ready_index, bool has_frame,
+rp_result D3D11Backend::composite_and_present(uint32_t ready_index, uint64_t sync_value, bool has_frame,
                                               uint8_t* out_rgba, std::string& err) {
+    (void)sync_value;
     // Windowed readback (swapchain present + CPU pixel readback in the same call) is not
     // implemented: the render target in that path is the back buffer, but the readback below
     // copies from the offscreen texture, which is never drawn into when a swapchain exists.
