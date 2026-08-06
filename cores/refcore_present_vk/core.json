@@ -1,0 +1,8 @@
+{
+  "id": "refcore_present_vk",
+  "name": "Reference Presenting Core (Vulkan)",
+  "type": "presenting",
+  "abi_version": 1,
+  "graphics_api": "vulkan",
+  "entry": "refcore_present_vk.dll"
+}
