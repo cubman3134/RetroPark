@@ -199,12 +199,198 @@ rp_result VulkanBackend::allocate_surfaces(uint32_t count, uint32_t w, uint32_t 
 
     return RP_OK;
 }
-rp_result VulkanBackend::composite_and_present(uint32_t, uint64_t, bool, uint8_t*, std::string& err) {
-    err="composite not implemented until Task 5"; return RP_ERR_UNSUPPORTED;
+// Lazily create everything the headless composite path needs: the compositor's
+// pipelines, an offscreen render target (+ view), a host-visible staging buffer to
+// read it back through, and a reusable command pool/buffer/fence. Idempotent.
+rp_result VulkanBackend::ensure_composite_resources(std::string& err) {
+    if (!compositor_ready_) {
+        rp_result r = compositor_.initialize(device_, VK_FORMAT_R8G8B8A8_UNORM, err);
+        if (r != RP_OK) return r;
+        compositor_ready_ = true;
+    }
+
+    if (!offscreen_image_) {
+        VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        ici.imageType = VK_IMAGE_TYPE_2D;
+        ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+        ici.extent = {width_, height_, 1};
+        ici.mipLevels = 1;
+        ici.arrayLayers = 1;
+        ici.samples = VK_SAMPLE_COUNT_1_BIT;
+        ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VK_CHECK(vkCreateImage(device_, &ici, nullptr, &offscreen_image_), err, "offscreen image");
+
+        VkMemoryRequirements req; vkGetImageMemoryRequirements(device_, offscreen_image_, &req);
+        uint32_t typeIndex = 0;
+        if (!find_mem_type(phys_, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, typeIndex)) {
+            err = "no device-local memory type for offscreen target"; return RP_ERR_DEVICE;
+        }
+        VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        mai.allocationSize = req.size; mai.memoryTypeIndex = typeIndex;
+        VK_CHECK(vkAllocateMemory(device_, &mai, nullptr, &offscreen_mem_), err, "offscreen alloc");
+        VK_CHECK(vkBindImageMemory(device_, offscreen_image_, offscreen_mem_, 0), err, "offscreen bind");
+
+        VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vci.image = offscreen_image_;
+        vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vci.format = VK_FORMAT_R8G8B8A8_UNORM;
+        vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        VK_CHECK(vkCreateImageView(device_, &vci, nullptr, &offscreen_view_), err, "offscreen view");
+
+        const VkDeviceSize bytes = static_cast<VkDeviceSize>(width_) * height_ * 4;
+        VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bci.size = bytes; bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT; bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        VK_CHECK(vkCreateBuffer(device_, &bci, nullptr, &staging_buf_), err, "staging buffer");
+        VkMemoryRequirements breq; vkGetBufferMemoryRequirements(device_, staging_buf_, &breq);
+        uint32_t btype = 0;
+        if (!find_mem_type(phys_, breq.memoryTypeBits,
+                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, btype)) {
+            err = "no host-visible memory type for staging"; return RP_ERR_DEVICE;
+        }
+        VkMemoryAllocateInfo bmai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        bmai.allocationSize = breq.size; bmai.memoryTypeIndex = btype;
+        VK_CHECK(vkAllocateMemory(device_, &bmai, nullptr, &staging_mem_), err, "staging alloc");
+        VK_CHECK(vkBindBufferMemory(device_, staging_buf_, staging_mem_, 0), err, "staging bind");
+    }
+
+    if (!composite_pool_) {
+        VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        pci.queueFamilyIndex = queue_family_;
+        pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        VK_CHECK(vkCreateCommandPool(device_, &pci, nullptr, &composite_pool_), err, "composite pool");
+
+        VkCommandBufferAllocateInfo cbai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        cbai.commandPool = composite_pool_;
+        cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbai.commandBufferCount = 1;
+        VK_CHECK(vkAllocateCommandBuffers(device_, &cbai, &composite_cmd_), err, "composite cmd alloc");
+
+        VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        VK_CHECK(vkCreateFence(device_, &fci, nullptr, &composite_fence_), err, "composite fence");
+    }
+    return RP_OK;
+}
+
+rp_result VulkanBackend::composite_and_present(uint32_t ready_index, uint64_t sync_value, bool has_frame,
+                                               uint8_t* out_rgba, std::string& err) {
+    if (!device_) { err = "device not initialized"; return RP_ERR_INTERNAL; }
+    if (has_frame && ready_index >= surfaces_.size()) { err = "bad ready_index"; return RP_ERR_BAD_ARG; }
+
+    rp_result r = ensure_composite_resources(err);
+    if (r != RP_OK) return r;
+
+    VK_CHECK(vkResetFences(device_, 1, &composite_fence_), err, "reset composite fence");
+    VK_CHECK(vkResetCommandBuffer(composite_cmd_, 0), err, "reset composite cmd");
+
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    VK_CHECK(vkBeginCommandBuffer(composite_cmd_, &bi), err, "begin composite cmd");
+
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+    // Acquire ownership of the core's shared image from the external queue family. No
+    // layout change (GENERAL->GENERAL): the shared images live in GENERAL for their
+    // whole life, and the compositor's descriptor samples them in GENERAL too.
+    if (has_frame) {
+        VkImageMemoryBarrier acquire{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        acquire.srcAccessMask = 0;
+        acquire.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        acquire.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        acquire.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        acquire.srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL_KHR;
+        acquire.dstQueueFamilyIndex = queue_family_;
+        acquire.image = surfaces_[ready_index].image;
+        acquire.subresourceRange = range;
+        vkCmdPipelineBarrier(composite_cmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &acquire);
+    }
+
+    r = compositor_.render(composite_cmd_, offscreen_view_,
+                           has_frame ? surfaces_[ready_index].view : VK_NULL_HANDLE,
+                           width_, height_, err);
+    if (r != RP_OK) { vkEndCommandBuffer(composite_cmd_); return r; }
+
+    // Offscreen target -> TRANSFER_SRC so it can be copied into the staging buffer.
+    VkImageMemoryBarrier toSrc{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    toSrc.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    toSrc.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    toSrc.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    toSrc.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    toSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toSrc.image = offscreen_image_;
+    toSrc.subresourceRange = range;
+    vkCmdPipelineBarrier(composite_cmd_, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &toSrc);
+
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {width_, height_, 1};
+    vkCmdCopyImageToBuffer(composite_cmd_, offscreen_image_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           staging_buf_, 1, &region);
+
+    VK_CHECK(vkEndCommandBuffer(composite_cmd_), err, "end composite cmd");
+
+    // Wait the shared timeline >= sync_value (the core's producer signal) before the
+    // GPU touches its image, and signal sync_value+1 once this composite is done.
+    uint64_t waitValue = sync_value, signalValue = sync_value + 1;
+    VkTimelineSemaphoreSubmitInfo tssi{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1; si.pCommandBuffers = &composite_cmd_;
+    if (has_frame) {
+        tssi.waitSemaphoreValueCount = 1; tssi.pWaitSemaphoreValues = &waitValue;
+        tssi.signalSemaphoreValueCount = 1; tssi.pSignalSemaphoreValues = &signalValue;
+        si.pNext = &tssi;
+        si.waitSemaphoreCount = 1; si.pWaitSemaphores = &timeline_; si.pWaitDstStageMask = &waitStage;
+        si.signalSemaphoreCount = 1; si.pSignalSemaphores = &timeline_;
+    }
+    VK_CHECK(vkQueueSubmit(queue_, 1, &si, composite_fence_), err, "composite queue submit");
+
+    const uint64_t kOneSecondNs = 1000000000ull;
+    VkResult wr = vkWaitForFences(device_, 1, &composite_fence_, VK_TRUE, kOneSecondNs);
+    if (wr != VK_SUCCESS) { err = "composite fence wait timed out"; return RP_ERR_TIMEOUT; }
+
+    if (out_rgba) {
+        void* mapped = nullptr;
+        VK_CHECK(vkMapMemory(device_, staging_mem_, 0, VK_WHOLE_SIZE, 0, &mapped), err, "map staging");
+        const uint8_t* src = static_cast<const uint8_t*>(mapped);
+        for (uint32_t y = 0; y < height_; ++y)
+            std::memcpy(out_rgba + static_cast<size_t>(y) * width_ * 4,
+                       src + static_cast<size_t>(y) * width_ * 4, static_cast<size_t>(width_) * 4);
+        vkUnmapMemory(device_, staging_mem_);
+    }
+    return RP_OK;
+}
+
+// Reverse-order teardown of the composite path: fence/pool, staging, offscreen
+// target, then the compositor's own objects. Safe to call on a partially-built or
+// never-used composite path (every handle is null-guarded).
+void VulkanBackend::destroy_composite() {
+    if (!device_) return;
+    if (composite_fence_) { vkDestroyFence(device_, composite_fence_, nullptr); composite_fence_ = VK_NULL_HANDLE; }
+    if (composite_pool_) {   // also frees composite_cmd_
+        vkDestroyCommandPool(device_, composite_pool_, nullptr);
+        composite_pool_ = VK_NULL_HANDLE; composite_cmd_ = VK_NULL_HANDLE;
+    }
+    if (staging_buf_) { vkDestroyBuffer(device_, staging_buf_, nullptr); staging_buf_ = VK_NULL_HANDLE; }
+    if (staging_mem_) { vkFreeMemory(device_, staging_mem_, nullptr); staging_mem_ = VK_NULL_HANDLE; }
+    if (offscreen_view_) { vkDestroyImageView(device_, offscreen_view_, nullptr); offscreen_view_ = VK_NULL_HANDLE; }
+    if (offscreen_image_) { vkDestroyImage(device_, offscreen_image_, nullptr); offscreen_image_ = VK_NULL_HANDLE; }
+    if (offscreen_mem_) { vkFreeMemory(device_, offscreen_mem_, nullptr); offscreen_mem_ = VK_NULL_HANDLE; }
+    if (compositor_ready_) { compositor_.destroy(); compositor_ready_ = false; }
 }
 
 VulkanBackend::~VulkanBackend() {
-    if (device_) { vkDeviceWaitIdle(device_); destroy_surfaces(); vkDestroyDevice(device_, nullptr); }
+    if (device_) {
+        vkDeviceWaitIdle(device_);
+        destroy_composite();   // created after surfaces_, torn down before them
+        destroy_surfaces();
+        vkDestroyDevice(device_, nullptr);
+    }
     if (instance_) vkDestroyInstance(instance_, nullptr);
 }
 }

@@ -1,6 +1,7 @@
 #pragma once
 #include "render/IRenderBackend.h"
 #include "render/vulkan/VulkanCommon.h"
+#include "render/vulkan/VulkanCompositor.h"
 #include <vector>
 
 namespace rp {
@@ -20,6 +21,8 @@ public:
 protected:
     rp_result create_instance_and_device(std::string& err);
     void destroy_surfaces();         // free/close a surface batch (reverse order)
+    rp_result ensure_composite_resources(std::string& err);   // lazy: compositor + offscreen + staging + cmd/fence
+    void destroy_composite();        // reverse-order teardown of the composite resources
 
     // One exported shared image slot: the VkImage lives on device_, its backing
     // VkDeviceMemory is exported as an opaque-Win32 NT handle that another
@@ -41,5 +44,17 @@ protected:
     VkSemaphore timeline_ = VK_NULL_HANDLE;  // exported shared timeline semaphore
     void* sync_handle_ = nullptr;            // exported NT handle for timeline_ (owned)
     uint32_t width_ = 0, height_ = 0;
+
+    // Headless composite path (lazily created on first composite_and_present call).
+    VulkanCompositor compositor_;
+    bool compositor_ready_ = false;
+    VkImage offscreen_image_ = VK_NULL_HANDLE;
+    VkDeviceMemory offscreen_mem_ = VK_NULL_HANDLE;
+    VkImageView offscreen_view_ = VK_NULL_HANDLE;
+    VkBuffer staging_buf_ = VK_NULL_HANDLE;
+    VkDeviceMemory staging_mem_ = VK_NULL_HANDLE;
+    VkCommandPool composite_pool_ = VK_NULL_HANDLE;
+    VkCommandBuffer composite_cmd_ = VK_NULL_HANDLE;
+    VkFence composite_fence_ = VK_NULL_HANDLE;
 };
 }
