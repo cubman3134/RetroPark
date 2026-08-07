@@ -1,4 +1,5 @@
 #include "render/vulkan/VulkanBackend.h"
+#include "render/FramebufferCopy.h"
 #include <vector>
 
 namespace rp {
@@ -409,6 +410,43 @@ rp_result VulkanBackend::ensure_composite_resources(std::string& err) {
     return RP_OK;
 }
 
+// Records a TRANSFER_SRC transition of offscreen_image_ and a copy of its full extent
+// (width_ x height_) into staging_buf_. Shared by composite_and_present() and
+// composite_driven() so the offscreen->staging readback path exists exactly once.
+void VulkanBackend::record_offscreen_readback(VkCommandBuffer cmd) {
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageMemoryBarrier toSrc{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    toSrc.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    toSrc.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    toSrc.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    toSrc.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    toSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toSrc.image = offscreen_image_;
+    toSrc.subresourceRange = range;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &toSrc);
+
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {width_, height_, 1};
+    vkCmdCopyImageToBuffer(cmd, offscreen_image_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging_buf_, 1, &region);
+}
+
+// Maps staging_buf_'s memory (already populated by a completed record_offscreen_readback()
+// submission the caller has fence-waited) and copies width_ x height_ RGBA8 rows into
+// out_rgba. Shared by composite_and_present() and composite_driven().
+rp_result VulkanBackend::copy_staging_to_out(uint8_t* out_rgba, std::string& err) {
+    void* mapped = nullptr;
+    VK_CHECK(vkMapMemory(device_, staging_mem_, 0, VK_WHOLE_SIZE, 0, &mapped), err, "map staging");
+    const uint8_t* src = static_cast<const uint8_t*>(mapped);
+    for (uint32_t y = 0; y < height_; ++y)
+        std::memcpy(out_rgba + static_cast<size_t>(y) * width_ * 4,
+                   src + static_cast<size_t>(y) * width_ * 4, static_cast<size_t>(width_) * 4);
+    vkUnmapMemory(device_, staging_mem_);
+    return RP_OK;
+}
+
 rp_result VulkanBackend::composite_and_present(uint32_t ready_index, uint64_t sync_value, bool has_frame,
                                                uint8_t* out_rgba, std::string& err) {
     if (!device_) { err = "device not initialized"; return RP_ERR_INTERNAL; }
@@ -468,24 +506,7 @@ rp_result VulkanBackend::composite_and_present(uint32_t ready_index, uint64_t sy
                            width_, height_, err);
     if (r != RP_OK) { vkEndCommandBuffer(composite_cmd_); return r; }
 
-    // Offscreen target -> TRANSFER_SRC so it can be copied into the staging buffer.
-    VkImageMemoryBarrier toSrc{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-    toSrc.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    toSrc.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    toSrc.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    toSrc.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    toSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toSrc.image = offscreen_image_;
-    toSrc.subresourceRange = range;
-    vkCmdPipelineBarrier(composite_cmd_, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &toSrc);
-
-    VkBufferImageCopy region{};
-    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.imageExtent = {width_, height_, 1};
-    vkCmdCopyImageToBuffer(composite_cmd_, offscreen_image_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           staging_buf_, 1, &region);
+    record_offscreen_readback(composite_cmd_);
 
     VK_CHECK(vkEndCommandBuffer(composite_cmd_), err, "end composite cmd");
 
@@ -512,13 +533,8 @@ rp_result VulkanBackend::composite_and_present(uint32_t ready_index, uint64_t sy
     if (wr != VK_SUCCESS) { err = "composite fence wait timed out"; return RP_ERR_TIMEOUT; }
 
     if (out_rgba) {
-        void* mapped = nullptr;
-        VK_CHECK(vkMapMemory(device_, staging_mem_, 0, VK_WHOLE_SIZE, 0, &mapped), err, "map staging");
-        const uint8_t* src = static_cast<const uint8_t*>(mapped);
-        for (uint32_t y = 0; y < height_; ++y)
-            std::memcpy(out_rgba + static_cast<size_t>(y) * width_ * 4,
-                       src + static_cast<size_t>(y) * width_ * 4, static_cast<size_t>(width_) * 4);
-        vkUnmapMemory(device_, staging_mem_);
+        rp_result rr = copy_staging_to_out(out_rgba, err);
+        if (rr != RP_OK) return rr;
     }
     if (new_frame) last_present_sync_ = sync_value;   // consumed exactly once
     return RP_OK;
@@ -660,14 +676,260 @@ void VulkanBackend::destroy_composite() {
     if (compositor_ready_) { compositor_.destroy(); compositor_ready_ = false; }
 }
 
-rp_result VulkanBackend::composite_driven(const void*, uint32_t, uint32_t, uint32_t, bool, uint8_t*, std::string& err) {
-    err = "composite_driven not implemented yet";
-    return RP_ERR_UNSUPPORTED;
+// Reverse-order teardown of the driven upload path: view, image, image memory, then the
+// staging buffer + its memory. Safe to call on a partially-built or never-used path.
+void VulkanBackend::destroy_driven() {
+    if (!device_) return;
+    if (driven_view_) { vkDestroyImageView(device_, driven_view_, nullptr); driven_view_ = VK_NULL_HANDLE; }
+    if (driven_img_) { vkDestroyImage(device_, driven_img_, nullptr); driven_img_ = VK_NULL_HANDLE; }
+    if (driven_mem_) { vkFreeMemory(device_, driven_mem_, nullptr); driven_mem_ = VK_NULL_HANDLE; }
+    if (driven_staging_buf_) { vkDestroyBuffer(device_, driven_staging_buf_, nullptr); driven_staging_buf_ = VK_NULL_HANDLE; }
+    if (driven_staging_mem_) { vkFreeMemory(device_, driven_staging_mem_, nullptr); driven_staging_mem_ = VK_NULL_HANDLE; }
+    driven_w_ = 0; driven_h_ = 0;
+}
+
+// (Re)creates driven_img_/driven_view_ + driven_staging_buf_ on a size change, maps the
+// staging buffer and copies `data` into it (pitch-respecting, tightly packed dst) via
+// copy_rgba8_rows, then records + submits a single command buffer that transitions the
+// image UNDEFINED->TRANSFER_DST_OPTIMAL (a plain single-device transition: QUEUE_FAMILY_
+// IGNORED, NOT the cross-queue-family QFOT the shared presenting images use), copies the
+// staging buffer into it, and transitions it to SHADER_READ_ONLY_OPTIMAL; then fence-waits.
+// Using UNDEFINED as the transition's oldLayout is valid (and validation-clean) even on a
+// repeat call that reuses the same image: it tells the driver to discard prior contents,
+// which is exactly right since the copy below overwrites the whole image every time — and
+// it means this call never needs to track the image's previous actual layout.
+rp_result VulkanBackend::upload_driven_frame(const void* data, uint32_t width, uint32_t height,
+                                             uint32_t pitch, std::string& err) {
+    if (!driven_img_ || driven_w_ != width || driven_h_ != height) {
+        destroy_driven();
+
+        VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        ici.imageType = VK_IMAGE_TYPE_2D;
+        ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+        ici.extent = {width, height, 1};
+        ici.mipLevels = 1;
+        ici.arrayLayers = 1;
+        ici.samples = VK_SAMPLE_COUNT_1_BIT;
+        ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VK_CHECK(vkCreateImage(device_, &ici, nullptr, &driven_img_), err, "driven image");
+
+        VkMemoryRequirements req; vkGetImageMemoryRequirements(device_, driven_img_, &req);
+        uint32_t typeIndex = 0;
+        if (!find_mem_type(phys_, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, typeIndex)) {
+            err = "no device-local memory type for driven image"; return RP_ERR_DEVICE;
+        }
+        VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        mai.allocationSize = req.size; mai.memoryTypeIndex = typeIndex;
+        VK_CHECK(vkAllocateMemory(device_, &mai, nullptr, &driven_mem_), err, "driven alloc");
+        VK_CHECK(vkBindImageMemory(device_, driven_img_, driven_mem_, 0), err, "driven bind");
+
+        VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vci.image = driven_img_;
+        vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vci.format = VK_FORMAT_R8G8B8A8_UNORM;
+        vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        VK_CHECK(vkCreateImageView(device_, &vci, nullptr, &driven_view_), err, "driven view");
+
+        const VkDeviceSize bytes = static_cast<VkDeviceSize>(width) * height * 4;
+        VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bci.size = bytes; bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT; bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        VK_CHECK(vkCreateBuffer(device_, &bci, nullptr, &driven_staging_buf_), err, "driven staging buffer");
+        VkMemoryRequirements breq; vkGetBufferMemoryRequirements(device_, driven_staging_buf_, &breq);
+        uint32_t btype = 0;
+        if (!find_mem_type(phys_, breq.memoryTypeBits,
+                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, btype)) {
+            err = "no host-visible memory type for driven staging"; return RP_ERR_DEVICE;
+        }
+        VkMemoryAllocateInfo bmai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        bmai.allocationSize = breq.size; bmai.memoryTypeIndex = btype;
+        VK_CHECK(vkAllocateMemory(device_, &bmai, nullptr, &driven_staging_mem_), err, "driven staging alloc");
+        VK_CHECK(vkBindBufferMemory(device_, driven_staging_buf_, driven_staging_mem_, 0), err, "driven staging bind");
+
+        driven_w_ = width; driven_h_ = height;
+    }
+
+    void* mapped = nullptr;
+    VK_CHECK(vkMapMemory(device_, driven_staging_mem_, 0, VK_WHOLE_SIZE, 0, &mapped), err, "map driven staging");
+    copy_rgba8_rows(static_cast<const uint8_t*>(data), width, height, pitch,
+                    static_cast<uint8_t*>(mapped), width * 4);
+    vkUnmapMemory(device_, driven_staging_mem_);   // HOST_COHERENT: no explicit flush needed
+
+    VK_CHECK(vkResetFences(device_, 1, &composite_fence_), err, "reset driven upload fence");
+    VK_CHECK(vkResetCommandBuffer(composite_cmd_, 0), err, "reset driven upload cmd");
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    VK_CHECK(vkBeginCommandBuffer(composite_cmd_, &bi), err, "begin driven upload cmd");
+
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+    VkImageMemoryBarrier toDst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    toDst.srcAccessMask = 0;
+    toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toDst.image = driven_img_;
+    toDst.subresourceRange = range;
+    vkCmdPipelineBarrier(composite_cmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &toDst);
+
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {width, height, 1};
+    vkCmdCopyBufferToImage(composite_cmd_, driven_staging_buf_, driven_img_,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    VkImageMemoryBarrier toRead{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    toRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toRead.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toRead.image = driven_img_;
+    toRead.subresourceRange = range;
+    vkCmdPipelineBarrier(composite_cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &toRead);
+
+    VK_CHECK(vkEndCommandBuffer(composite_cmd_), err, "end driven upload cmd");
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1; si.pCommandBuffers = &composite_cmd_;
+    VK_CHECK(vkQueueSubmit(queue_, 1, &si, composite_fence_), err, "driven upload submit");
+
+    const uint64_t kOneSecondNs = 1000000000ull;
+    VkResult wr = vkWaitForFences(device_, 1, &composite_fence_, VK_TRUE, kOneSecondNs);
+    if (wr != VK_SUCCESS) { err = "driven upload fence wait timed out"; return RP_ERR_TIMEOUT; }
+    return RP_OK;
+}
+
+// Headless half of composite_driven(): renders the driven image (+ overlay) into the
+// offscreen target at DISPLAY size (width_ x height_ — not the per-call core width/height;
+// the compositor's fullscreen triangle samples 0..1 UVs so the core frame scales to fill
+// it), then reads it back into out_rgba via the same offscreen->staging path
+// composite_and_present() uses.
+rp_result VulkanBackend::composite_driven_headless(uint8_t* out_rgba, std::string& err) {
+    VK_CHECK(vkResetFences(device_, 1, &composite_fence_), err, "reset driven composite fence");
+    VK_CHECK(vkResetCommandBuffer(composite_cmd_, 0), err, "reset driven composite cmd");
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    VK_CHECK(vkBeginCommandBuffer(composite_cmd_, &bi), err, "begin driven composite cmd");
+
+    // driven_view_ may be null here (dupe==true, never uploaded) -> overlay-only.
+    rp_result r = compositor_.render(composite_cmd_, offscreen_view_, driven_view_,
+                                     width_, height_, err, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (r != RP_OK) { vkEndCommandBuffer(composite_cmd_); return r; }
+
+    if (out_rgba) record_offscreen_readback(composite_cmd_);
+
+    VK_CHECK(vkEndCommandBuffer(composite_cmd_), err, "end driven composite cmd");
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1; si.pCommandBuffers = &composite_cmd_;
+    VK_CHECK(vkQueueSubmit(queue_, 1, &si, composite_fence_), err, "driven composite submit");
+
+    const uint64_t kOneSecondNs = 1000000000ull;
+    VkResult wr = vkWaitForFences(device_, 1, &composite_fence_, VK_TRUE, kOneSecondNs);
+    if (wr != VK_SUCCESS) { err = "driven composite fence wait timed out"; return RP_ERR_TIMEOUT; }
+
+    if (out_rgba) {
+        rp_result rr = copy_staging_to_out(out_rgba, err);
+        if (rr != RP_OK) return rr;
+    }
+    return RP_OK;
+}
+
+// Windowed half of composite_driven(): acquires a swap image, renders the driven image (+
+// overlay) into it at DISPLAY size (swap_extent_, mirroring present_windowed()), and
+// presents. Unlike present_windowed(), there is no QFOT acquire and no shared timeline to
+// wait/signal — the driven image is a normal single-device sampled image, so only the
+// binary acquire/present semaphore pair is needed.
+rp_result VulkanBackend::present_driven_windowed(std::string& err) {
+    const uint64_t kTimeoutNs = 1000000000ull;
+
+    uint32_t imageIndex = 0;
+    VkResult ar = vkAcquireNextImageKHR(device_, swapchain_, kTimeoutNs, acquire_sem_, VK_NULL_HANDLE, &imageIndex);
+    if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
+        err = "vkAcquireNextImageKHR failed";
+        return (ar == VK_TIMEOUT || ar == VK_NOT_READY) ? RP_ERR_TIMEOUT : RP_ERR_DEVICE;
+    }
+
+    VK_CHECK(vkResetFences(device_, 1, &composite_fence_), err, "reset driven present fence");
+    VK_CHECK(vkResetCommandBuffer(composite_cmd_, 0), err, "reset driven present cmd");
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    VK_CHECK(vkBeginCommandBuffer(composite_cmd_, &bi), err, "begin driven present cmd");
+
+    rp_result r = compositor_.render(composite_cmd_, swap_views_[imageIndex], driven_view_,
+                                     swap_extent_.width, swap_extent_.height, err,
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (r != RP_OK) { vkEndCommandBuffer(composite_cmd_); return r; }
+
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageMemoryBarrier toPresent{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    toPresent.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    toPresent.dstAccessMask = 0;
+    toPresent.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    toPresent.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    toPresent.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toPresent.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toPresent.image = swap_images_[imageIndex];
+    toPresent.subresourceRange = range;
+    vkCmdPipelineBarrier(composite_cmd_, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &toPresent);
+
+    VK_CHECK(vkEndCommandBuffer(composite_cmd_), err, "end driven present cmd");
+
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.waitSemaphoreCount = 1; si.pWaitSemaphores = &acquire_sem_; si.pWaitDstStageMask = &waitStage;
+    si.commandBufferCount = 1; si.pCommandBuffers = &composite_cmd_;
+    si.signalSemaphoreCount = 1; si.pSignalSemaphores = &present_sems_[imageIndex];
+    VK_CHECK(vkQueueSubmit(queue_, 1, &si, composite_fence_), err, "driven present submit");
+
+    VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+    pi.waitSemaphoreCount = 1; pi.pWaitSemaphores = &present_sems_[imageIndex];
+    pi.swapchainCount = 1; pi.pSwapchains = &swapchain_; pi.pImageIndices = &imageIndex;
+    VkResult pr = vkQueuePresentKHR(queue_, &pi);
+    if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR) { err = "vkQueuePresentKHR failed"; return RP_ERR_DEVICE; }
+
+    VkResult wr = vkWaitForFences(device_, 1, &composite_fence_, VK_TRUE, kTimeoutNs);
+    if (wr != VK_SUCCESS) { err = "driven present fence wait timed out"; return RP_ERR_TIMEOUT; }
+    return RP_OK;
+}
+
+rp_result VulkanBackend::composite_driven(const void* data, uint32_t width, uint32_t height, uint32_t pitch,
+                                          bool dupe, uint8_t* out_rgba, std::string& err) {
+    if (!device_) { err = "device not initialized"; return RP_ERR_INTERNAL; }
+
+    // Same windowed-readback restriction as composite_and_present: the windowed render
+    // target is the acquired swap image, but the readback below copies from the offscreen
+    // target, which is never drawn into when a swapchain exists.
+    if (swapchain_ && out_rgba) {
+        err = "windowed readback (swapchain + out_rgba) is not supported";
+        return RP_ERR_UNSUPPORTED;
+    }
+
+    rp_result r = ensure_composite_resources(err);
+    if (r != RP_OK) return r;
+
+    if (!dupe) {
+        r = upload_driven_frame(data, width, height, pitch, err);
+        if (r != RP_OK) return r;
+    }
+    // dupe==true reuses driven_view_ as-is (no re-upload); if it was never populated
+    // (still VK_NULL_HANDLE), the compositor below gets a null core view -> overlay-only.
+
+    if (swapchain_) return present_driven_windowed(err);
+    return composite_driven_headless(out_rgba, err);
 }
 
 VulkanBackend::~VulkanBackend() {
     if (device_) {
         vkDeviceWaitIdle(device_);
+        destroy_driven();      // driven upload path (independent of the composite/swapchain state)
         destroy_composite();   // framebuffer may reference a swap view -> tear it down first
         destroy_swapchain();   // swapchain/views/surface (surface freed with instance alive)
         destroy_surfaces();
