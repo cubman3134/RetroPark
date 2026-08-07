@@ -1,0 +1,2 @@
+{ "id":"refcore_driven", "name":"Reference Driven Core", "type":"driven",
+  "abi_version":3, "graphics_api":"none", "entry":"refcore_driven.dll" }

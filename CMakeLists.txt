@@ -64,6 +64,7 @@ target_include_directories(retropark PRIVATE "${VK_GEN_DIR}")
 
 add_subdirectory(cores/refcore_present)
 add_subdirectory(cores/refcore_present_vk)
+add_subdirectory(cores/refcore_driven)
 add_subdirectory(harness/windowed)
 
 enable_testing()
