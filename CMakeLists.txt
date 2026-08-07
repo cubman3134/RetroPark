@@ -39,7 +39,8 @@ target_sources(retropark PRIVATE
   src/runtime/BackendFactory.cpp
   src/runtime/Runtime.cpp
   src/audio/AudioPool.cpp
-  src/audio/XAudio2Output.cpp)
+  src/audio/XAudio2Output.cpp
+  src/net/NetProtocol.cpp)
 target_include_directories(retropark PUBLIC include)
 target_include_directories(retropark PRIVATE src)
 target_compile_features(retropark PUBLIC cxx_std_17)
