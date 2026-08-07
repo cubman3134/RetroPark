@@ -1,0 +1,3 @@
+{ "id":"libretro_shim", "name":"libretro Shim (FCEUmm)", "type":"driven",
+  "abi_version":4, "graphics_api":"none", "entry":"LibretroShim.dll",
+  "libretro_core":"fceumm_libretro.dll" }
