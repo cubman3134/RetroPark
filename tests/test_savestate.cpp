@@ -9,10 +9,36 @@
 #include <string>
 #include <memory>
 #include <cstdint>
+#include <filesystem>
 
 #ifndef RP_DRIVEN_CORE_DIR
 #define RP_DRIVEN_CORE_DIR "cores/refcore_driven"
 #endif
+#ifndef RP_SHIM_DIR
+#define RP_SHIM_DIR "cores/libretro_shim"
+#endif
+#ifndef RP_NES_ROM_DIR
+#define RP_NES_ROM_DIR "C:/RetroBat/roms/nes"
+#endif
+
+// Duplicated (not shared) probe helpers, matching the sibling gated e2e files
+// (test_libretro_e2e.cpp, test_audio_flow.cpp) which each keep their own
+// prefixed static copy rather than a cross-TU header for two tiny functions.
+static bool savestate_file_exists(const std::string& path) {
+    std::error_code ec;
+    return std::filesystem::exists(path, ec);
+}
+
+static std::string savestate_first_nes(const std::string& dir) {
+    std::error_code ec;
+    if (!std::filesystem::exists(dir, ec)) return {};
+    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file()) continue;
+        if (entry.path().extension() == ".nes") return entry.path().string();
+    }
+    return {};
+}
 
 using namespace rp;
 
@@ -263,5 +289,60 @@ TEST_CASE("rp_runtime rewind: negative + guard cases") {
         rp_runtime_unload_core(rt);
     }
 
+    rp_runtime_destroy(rt);
+}
+
+// ---- Gated FCEUmm savestate e2e (real NES, deterministic) ----
+//
+// Same probe-and-WARN-skip gating as test_libretro_e2e.cpp / test_audio_flow.cpp: if the
+// FCEUmm core DLL or a NES ROM is absent (e.g. CI, a clean checkout), skip cleanly rather
+// than fail. On this machine (FCEUmm + Donkey Kong present under C:/RetroBat/roms/nes) it
+// runs for real and is the slice's single provable claim against actual emulation: save at
+// A, advance, load, and prove you are provably back at A -- pixel-exact.
+TEST_CASE("FCEUmm savestate e2e: pixel-exact deterministic restore (gated)") {
+    std::string rom = savestate_first_nes(RP_NES_ROM_DIR);
+    if (rom.empty() || !savestate_file_exists(std::string(RP_SHIM_DIR) + "/fceumm_libretro.dll")) {
+        WARN("no core/rom; skip");
+        return;
+    }
+    const uint32_t W = 256, H = 240;   // NES resolution
+    rp_runtime* rt = rp_runtime_create(RP_GFX_D3D11, nullptr);
+    REQUIRE(rt);
+    REQUIRE(rp_runtime_resize(rt, W, H) == RP_OK);
+    REQUIRE(rp_runtime_load_core(rt, RP_SHIM_DIR) == RP_OK);
+    REQUIRE(rp_runtime_load_content(rt, rom.c_str()) == RP_OK);
+
+    // Advance past boot exactly like test_libretro_e2e.cpp: run until the displayed frame
+    // actually changes rather than assuming a fixed boot-hold length for whichever ROM
+    // happens to sort first on this machine.
+    std::vector<uint8_t> early((size_t)W * H * 4, 0), boot((size_t)W * H * 4, 0);
+    for (int i = 0; i < 10; i++) rp_runtime_present(rt, early.data());
+    const int kMaxAdvance = 1000;
+    for (int i = 0; i < kMaxAdvance; i++) {
+        rp_runtime_present(rt, boot.data());
+        if (boot != early) break;
+    }
+    REQUIRE(boot != early);   // genuinely past a static boot/title screen before we test
+
+    size_t sz = rp_runtime_serialize_size(rt);
+    REQUIRE(sz > 0);          // NES savestate is a few KB, never zero for a loaded core
+
+    std::vector<uint8_t> state(sz);
+    REQUIRE(rp_runtime_save_state(rt, state.data(), state.size()) == RP_OK);
+
+    std::vector<uint8_t> r1((size_t)W * H * 4, 0);
+    REQUIRE(rp_runtime_present(rt, r1.data()) == RP_OK);
+
+    std::vector<uint8_t> advanced((size_t)W * H * 4, 0);
+    for (int i = 0; i < 60; i++) REQUIRE(rp_runtime_present(rt, advanced.data()) == RP_OK);
+    CHECK(advanced != r1);    // the game actually moved on since the save point
+
+    REQUIRE(rp_runtime_load_state(rt, state.data(), state.size()) == RP_OK);
+
+    std::vector<uint8_t> r2((size_t)W * H * 4, 0);
+    REQUIRE(rp_runtime_present(rt, r2.data()) == RP_OK);
+    CHECK(r2 == r1);          // re-executes deterministically from the restored state: pixel-exact
+
+    rp_runtime_unload_core(rt);
     rp_runtime_destroy(rt);
 }
