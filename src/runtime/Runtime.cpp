@@ -14,6 +14,10 @@ static void host_submit(rp_host* h, uint32_t i, uint64_t g, uint64_t sv) {
 static void host_input(rp_host* h, rp_input_state* out) {
     reinterpret_cast<Runtime*>(h)->on_input(out);
 }
+static void host_video_refresh(rp_host* h, const void* d, uint32_t w, uint32_t hh, uint32_t p) {
+    reinterpret_cast<Runtime*>(h)->on_video_refresh(d, w, hh, p);
+}
+static void host_audio_sample(rp_host*, const int16_t*, size_t) {}
 
 Runtime::Runtime(rp_graphics_api api, void* native_window) : native_window_(native_window), api_(api) {
     backend_ = make_backend(api_);
@@ -27,6 +31,8 @@ Runtime::Runtime(rp_graphics_api api, void* native_window) : native_window_(nati
     host_iface_.log = host_log;
     host_iface_.submit_frame = host_submit;
     host_iface_.input_state = host_input;
+    host_iface_.video_refresh = host_video_refresh;
+    host_iface_.audio_sample = host_audio_sample;
 }
 
 Runtime::~Runtime() { unload_core(); }
@@ -41,6 +47,12 @@ void Runtime::on_input(rp_input_state* out) {
 void Runtime::set_input(const rp_input_state& in) {
     std::lock_guard<std::mutex> lk(input_mtx_);
     input_ = in;
+}
+void Runtime::on_video_refresh(const void* data, uint32_t w, uint32_t h, uint32_t pitch) {
+    dr_have_ = true;
+    dr_dupe_ = (data == nullptr);
+    dr_data_ = data;
+    dr_w_ = w; dr_h_ = h; dr_pitch_ = pitch;
 }
 
 rp_result Runtime::rebuild_surfaces(std::string& err) {
@@ -90,8 +102,7 @@ rp_result Runtime::load_core(const std::string& core_dir) {
     std::stringstream ss; ss << f.rdbuf();
     CoreManifest m; std::string err;
     if (parse_manifest(ss.str(), m, err) != RP_OK) return RP_ERR_BAD_ARG;
-    if (m.type != RP_CORE_PRESENTING) return RP_ERR_UNSUPPORTED; // driven not in Slice A
-    if (m.graphics_api != api_) return RP_ERR_UNSUPPORTED; // core must match runtime's backend api
+    if (m.type == RP_CORE_PRESENTING && m.graphics_api != api_) return RP_ERR_UNSUPPORTED; // presenting core must match runtime's backend api
 
     std::string dll = core_dir + "/" + m.entry;
     if (Win32CoreModule::open(dll, module_, err) != RP_OK) return RP_ERR_NOT_FOUND;
@@ -106,6 +117,17 @@ rp_result Runtime::load_core(const std::string& core_dir) {
     }
 
     core_loaded_ = true;
+    core_type_ = m.type;
+
+    if (core_type_ == RP_CORE_DRIVEN) {
+        rp_av_info av{};
+        rp_result r = loader_.get_av_info(&av, err);
+        if (r != RP_OK) { unload_core(); return r; }
+        if (!(av.base_width > 0 && av.base_height > 0)) { unload_core(); return RP_ERR_UNSUPPORTED; }
+        if (av.pixel_format != RP_FMT_R8G8B8A8_UNORM) { unload_core(); return RP_ERR_UNSUPPORTED; }
+        return RP_OK;
+    }
+
     rp_result r = rebuild_surfaces(err);
     if (r != RP_OK) {
         unload_core();
@@ -124,14 +146,25 @@ rp_result Runtime::unload_core() {
     loader_.destroy();
     module_.reset();
     core_loaded_ = false;
+    core_type_ = RP_CORE_PRESENTING;
+    dr_data_ = nullptr; dr_w_ = 0; dr_h_ = 0; dr_pitch_ = 0;
+    dr_dupe_ = false; dr_have_ = false;
     return RP_OK;
 }
 
 rp_result Runtime::present(uint8_t* out_rgba) {
     if (!backend_) return RP_ERR_DEVICE;
+    std::string err;
+    if (core_loaded_ && core_type_ == RP_CORE_DRIVEN) {
+        dr_have_ = false;
+        rp_result r = loader_.run_frame(err);
+        if (r != RP_OK) return r;
+        bool dupe = !dr_have_ || dr_dupe_;
+        return backend_->composite_driven(dr_dupe_ ? nullptr : dr_data_,
+                                          dr_w_, dr_h_, dr_pitch_, dupe, out_rgba, err);
+    }
     uint32_t idx = 0; uint64_t sv = 0;
     bool has = ring_.latest_ready(idx, sv);
-    std::string err;
     return backend_->composite_and_present(idx, sv, has, out_rgba, err);
 }
 
