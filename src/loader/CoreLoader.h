@@ -17,9 +17,11 @@ public:
     void destroy();
     rp_result run_frame(std::string& error);
     rp_result get_av_info(rp_av_info* out, std::string& error);
+    rp_result load_content(const char* path, std::string& error);
 
     LoaderState state() const { return state_; }
     const rp_core_abi* abi() const { return abi_; }
+    bool has_load_content() const { return abi_ && abi_->load_content != nullptr; }
 
 private:
     LoaderState state_ = LoaderState::Unloaded;

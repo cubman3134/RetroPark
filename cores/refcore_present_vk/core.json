@@ -2,7 +2,7 @@
   "id": "refcore_present_vk",
   "name": "Reference Presenting Core (Vulkan)",
   "type": "presenting",
-  "abi_version": 3,
+  "abi_version": 4,
   "graphics_api": "vulkan",
   "entry": "refcore_present_vk.dll"
 }

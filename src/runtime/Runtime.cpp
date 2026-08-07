@@ -122,15 +122,19 @@ rp_result Runtime::load_core(const std::string& core_dir) {
     core_type_ = m.type;
 
     if (core_type_ == RP_CORE_DRIVEN) {
-        rp_av_info av{};
-        rp_result r = loader_.get_av_info(&av, err);
-        if (r != RP_OK) { unload_core(); return r; }
-        if (!(av.base_width > 0 && av.base_height > 0)) { unload_core(); return RP_ERR_UNSUPPORTED; }
-        if (av.pixel_format != RP_FMT_R8G8B8A8_UNORM) { unload_core(); return RP_ERR_UNSUPPORTED; }
-        // A core reporting max geometry smaller than its base geometry is malformed; clamp
-        // so a well-behaved base-size frame is never wrongly rejected as oversize.
-        dr_max_w_ = std::max(av.max_width, av.base_width);
-        dr_max_h_ = std::max(av.max_height, av.base_height);
+        requires_content_ = loader_.has_load_content();
+        content_loaded_ = false;
+        if (!requires_content_) {
+            rp_av_info av{};
+            rp_result r = loader_.get_av_info(&av, err);
+            if (r != RP_OK) { unload_core(); return r; }
+            if (!(av.base_width > 0 && av.base_height > 0)) { unload_core(); return RP_ERR_UNSUPPORTED; }
+            if (av.pixel_format != RP_FMT_R8G8B8A8_UNORM) { unload_core(); return RP_ERR_UNSUPPORTED; }
+            // A core reporting max geometry smaller than its base geometry is malformed; clamp
+            // so a well-behaved base-size frame is never wrongly rejected as oversize.
+            dr_max_w_ = std::max(av.max_width, av.base_width);
+            dr_max_h_ = std::max(av.max_height, av.base_height);
+        }
         return RP_OK;
     }
 
@@ -156,6 +160,22 @@ rp_result Runtime::unload_core() {
     dr_data_ = nullptr; dr_w_ = 0; dr_h_ = 0; dr_pitch_ = 0;
     dr_dupe_ = false; dr_have_ = false;
     dr_max_w_ = 0; dr_max_h_ = 0;
+    requires_content_ = false; content_loaded_ = false;
+    return RP_OK;
+}
+
+rp_result Runtime::load_content(const char* path) {
+    if (!core_loaded_ || core_type_ != RP_CORE_DRIVEN) return RP_ERR_INTERNAL;
+    std::string err;
+    rp_result r = loader_.load_content(path ? path : "", err);
+    if (r != RP_OK) return r;
+    rp_av_info av{};
+    if (loader_.get_av_info(&av, err) != RP_OK) return RP_ERR_INTERNAL;
+    if (av.base_width == 0 || av.base_height == 0) return RP_ERR_UNSUPPORTED;
+    if (av.pixel_format != RP_FMT_R8G8B8A8_UNORM) return RP_ERR_UNSUPPORTED;
+    dr_max_w_ = std::max(av.max_width, av.base_width);
+    dr_max_h_ = std::max(av.max_height, av.base_height);
+    content_loaded_ = true;
     return RP_OK;
 }
 
@@ -163,6 +183,7 @@ rp_result Runtime::present(uint8_t* out_rgba) {
     if (!backend_) return RP_ERR_DEVICE;
     std::string err;
     if (core_loaded_ && core_type_ == RP_CORE_DRIVEN) {
+        if (requires_content_ && !content_loaded_) return RP_ERR_INTERNAL;
         dr_have_ = false;
         rp_result r = loader_.run_frame(err);
         if (r != RP_OK) return r;
@@ -195,6 +216,9 @@ rp_result rp_runtime_load_core(rp_runtime* rt, const char* dir) {
 }
 rp_result rp_runtime_unload_core(rp_runtime* rt) {
     return reinterpret_cast<Runtime*>(rt)->unload_core();
+}
+rp_result rp_runtime_load_content(rp_runtime* rt, const char* path) {
+    return reinterpret_cast<Runtime*>(rt)->load_content(path);
 }
 rp_result rp_runtime_resize(rp_runtime* rt, uint32_t w, uint32_t h) {
     return reinterpret_cast<Runtime*>(rt)->resize(w, h);

@@ -15,6 +15,7 @@ public:
     ~Runtime();
     rp_result load_core(const std::string& core_dir);
     rp_result unload_core();
+    rp_result load_content(const char* path);
     rp_result resize(uint32_t w, uint32_t h);
     void set_input(const rp_input_state& in);
     rp_result present(uint8_t* out_rgba);
@@ -44,5 +45,7 @@ private:
     uint32_t dr_w_ = 0, dr_h_ = 0, dr_pitch_ = 0;
     bool dr_dupe_ = false, dr_have_ = false;
     uint32_t dr_max_w_ = 0, dr_max_h_ = 0;
+    bool requires_content_ = false;
+    bool content_loaded_ = false;
 };
 }
