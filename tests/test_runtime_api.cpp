@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 #include <retropark/retropark.h>
+#include <vector>
 #ifndef RP_DRIVEN_CORE_DIR
 #define RP_DRIVEN_CORE_DIR "cores/refcore_driven"
 #endif
@@ -63,4 +64,18 @@ TEST_CASE("runtime: load_content on a loaded driven core with no load_content fn
     CHECK(rp_runtime_load_content(rt, "x.nes") == RP_ERR_UNSUPPORTED);
     rp_runtime_unload_core(rt);
     rp_runtime_destroy(rt);
+}
+
+TEST_CASE("runtime: audio stats are zero for a no-audio driven core") {
+    rp_runtime* rt = rp_runtime_create(RP_GFX_D3D11, nullptr);
+    REQUIRE(rt);
+    REQUIRE(rp_runtime_resize(rt, 64, 64) == RP_OK);
+    REQUIRE(rp_runtime_load_core(rt, RP_DRIVEN_CORE_DIR) == RP_OK);   // refcore_driven: sample_rate 0
+    std::vector<uint8_t> img(64*64*4, 0);
+    for (int i=0;i<5;i++) rp_runtime_present(rt, img.data());
+    uint64_t frames = 999; int nonsilent = 9;
+    rp_runtime_audio_stats(rt, &frames, &nonsilent);
+    CHECK(frames == 0);          // no-audio core produced no samples
+    CHECK(nonsilent == 0);
+    rp_runtime_unload_core(rt); rp_runtime_destroy(rt);
 }

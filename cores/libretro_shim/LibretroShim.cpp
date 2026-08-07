@@ -12,6 +12,7 @@
 #include <sstream>
 #include <cstdint>
 #include <cstdarg>
+#include <unordered_map>
 
 #define RP_EXPORT extern "C" __declspec(dllexport)
 
@@ -42,7 +43,36 @@ struct Shim {
     std::string sys_dir;            // returned to the core (writable path)
     bool game_loaded = false;
     rp_input_state input{};         // last input snapshot from RetroPark
+    // Core option defaults captured from RETRO_ENVIRONMENT_SET_VARIABLES (legacy variable
+    // API), keyed by option key. Populated once at retro_set_environment-driven negotiation,
+    // before retro_load_game; answered back verbatim on GET_VARIABLE (see below).
+    std::unordered_map<std::string, std::string> option_defaults;
 };
+
+// RETRO_ENVIRONMENT_SET_VARIABLES's retro_variable::value is, per the libretro spec, a
+// "<human title>; <default>|<opt2>|<opt3>..." string. Many cores (FCEUmm's sound volume
+// among them) hold their internal option state in a plain static that is zero-initialized
+// until the frontend actually answers a later GET_VARIABLE for that key with a real value —
+// a frontend that always reports "no such variable" leaves those statics at their zero
+// default forever (e.g. FCEUmm's sndvolume stays 0 => silent output despite a real audio
+// stream being paced and forwarded). Extract the "<default>" token so GET_VARIABLE can hand
+// it back and cores initialize the way any real libretro frontend would leave them.
+//
+// Returns false (out untouched) when 'value' has no ';' separator — a malformed,
+// spec-violating declaration with no parseable default token. The caller must NOT store
+// an entry for such a key: GET_VARIABLE needs to fall through to its "no such variable"
+// answer (value=nullptr, false) rather than hand the core a bogus empty-string override.
+// Well-formed libretro declarations always contain ';', so this never affects a
+// conforming core's real defaults.
+bool first_option_value(const std::string& value, std::string& out) {
+    size_t semi = value.find(';');
+    if (semi == std::string::npos) return false;
+    size_t start = semi + 1;
+    while (start < value.size() && value[start] == ' ') ++start;
+    size_t bar = value.find('|', start);
+    out = value.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
+    return true;
+}
 
 // libretro's callbacks (env_cb, video_cb, input_poll_cb, ...) are global C functions with
 // no per-instance context param, so the shim supports exactly one active instance at a
@@ -72,7 +102,14 @@ bool env_cb(unsigned cmd, void* data) {
             return true;
         case RETRO_ENVIRONMENT_GET_VARIABLE: {
             auto* v = static_cast<retro_variable*>(data);
-            v->value = nullptr;   // no overrides: core uses its own defaults
+            if (v->key) {
+                auto it = g->option_defaults.find(v->key);
+                if (it != g->option_defaults.end()) {
+                    v->value = it->second.c_str();
+                    return true;
+                }
+            }
+            v->value = nullptr;   // unknown key: no override, no default on file
             return false;
         }
         case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
@@ -95,12 +132,30 @@ bool env_cb(unsigned cmd, void* data) {
         case RETRO_ENVIRONMENT_GET_FASTFORWARDING:
             *static_cast<bool*>(data) = false;
             return true;
+        // Legacy core-option negotiation: capture each option's default token so a later
+        // GET_VARIABLE can answer it (see first_option_value's comment for why this matters
+        // — some cores hold option-derived state, like sound volume, in a zero-init static
+        // that a "no such variable" GET_VARIABLE answer never overwrites).
+        case RETRO_ENVIRONMENT_SET_VARIABLES: {
+            const auto* vars = static_cast<const retro_variable*>(data);
+            if (vars) {
+                for (; vars->key; ++vars) {
+                    std::string def;
+                    if (vars->value && first_option_value(vars->value, def)) {
+                        g->option_defaults[vars->key] = def;
+                    }
+                }
+            }
+            return true;
+        }
         // Descriptor/registration commands: accept and ignore. The shim uses a
         // fixed NES joypad map and requeries av_info each present, so geometry /
-        // av-info updates need no bookkeeping here.
+        // av-info updates need no bookkeeping here. GET_CORE_OPTIONS_VERSION reports 0
+        // above, so a well-behaved core negotiates options via the legacy SET_VARIABLES
+        // path handled above rather than these v1/v2 descriptor forms; still accept them
+        // (return true, do nothing) in case a core calls them anyway.
         case RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS:
         case RETRO_ENVIRONMENT_SET_CONTROLLER_INFO:
-        case RETRO_ENVIRONMENT_SET_VARIABLES:
         case RETRO_ENVIRONMENT_SET_CORE_OPTIONS:
         case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_INTL:
         case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2:
@@ -148,8 +203,15 @@ int16_t input_state_cb(unsigned port, unsigned device, unsigned, unsigned id) {
     }
 }
 
-void   audio_cb(int16_t, int16_t) {}                                   // dropped
-size_t audio_batch_cb(const int16_t*, size_t frames) { return frames; } // dropped
+// per-sample: forward one stereo frame.
+void audio_cb(int16_t left, int16_t right) {
+    if (g) { int16_t pair[2] = {left, right}; g->host.audio_sample(g->host.host, pair, 1); }
+}
+// batch: interleaved stereo int16, `frames` stereo frames. Forward straight through.
+size_t audio_batch_cb(const int16_t* data, size_t frames) {
+    if (g && data && frames) g->host.audio_sample(g->host.host, data, frames);
+    return frames;
+}
 
 // Directory of THIS dll (used to self-locate core.json and the libretro core).
 std::wstring shim_dir() {

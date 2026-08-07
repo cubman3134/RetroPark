@@ -2,6 +2,7 @@
 #include "runtime/BackendFactory.h"
 #include "loader/Manifest.h"
 #include "render/FramebufferCopy.h"
+#include "audio/XAudio2Output.h"
 #include <fstream>
 #include <sstream>
 #include <cstring>
@@ -19,7 +20,9 @@ static void host_input(rp_host* h, rp_input_state* out) {
 static void host_video_refresh(rp_host* h, const void* d, uint32_t w, uint32_t hh, uint32_t p) {
     reinterpret_cast<Runtime*>(h)->on_video_refresh(d, w, hh, p);
 }
-static void host_audio_sample(rp_host*, const int16_t*, size_t) {}
+static void host_audio_sample(rp_host* h, const int16_t* f, size_t n) {
+    reinterpret_cast<Runtime*>(h)->on_audio_sample(f, n);
+}
 
 Runtime::Runtime(rp_graphics_api api, void* native_window) : native_window_(native_window), api_(api) {
     backend_ = make_backend(api_);
@@ -55,6 +58,26 @@ void Runtime::on_video_refresh(const void* data, uint32_t w, uint32_t h, uint32_
     dr_dupe_ = (data == nullptr);
     dr_data_ = data;
     dr_w_ = w; dr_h_ = h; dr_pitch_ = pitch;
+}
+void Runtime::on_audio_sample(const int16_t* frames, size_t n) {
+    if (!frames || n == 0) return;
+    audio_frames_ += n;
+    if (!audio_nonsilent_) {
+        // n * 2: stereo-only pipeline contract — open_audio() always opens channels = 2 and
+        // the shim forwards interleaved stereo, so each of the n frames is 2 int16 samples.
+        // Revisit this scan if a mono path is ever added.
+        for (size_t i = 0; i < n * 2; ++i) { int16_t s = frames[i]; if (s > 128 || s < -128) { audio_nonsilent_ = true; break; } }
+    }
+    if (audio_) audio_->submit(frames, n);
+}
+void Runtime::open_audio(const rp_av_info& av) {
+    audio_frames_ = 0;
+    audio_nonsilent_ = false;
+    if (av.sample_rate <= 0.0) return;           // no audio
+    auto out = std::make_unique<XAudio2Output>();
+    std::string err;
+    if (out->open((uint32_t)av.sample_rate, 2, err) == RP_OK) audio_ = std::move(out);
+    // best-effort: on failure leave audio_ null (game runs silent); do NOT fail load
 }
 
 rp_result Runtime::rebuild_surfaces(std::string& err) {
@@ -134,6 +157,7 @@ rp_result Runtime::load_core(const std::string& core_dir) {
             // so a well-behaved base-size frame is never wrongly rejected as oversize.
             dr_max_w_ = std::max(av.max_width, av.base_width);
             dr_max_h_ = std::max(av.max_height, av.base_height);
+            open_audio(av);
         }
         return RP_OK;
     }
@@ -161,6 +185,8 @@ rp_result Runtime::unload_core() {
     dr_dupe_ = false; dr_have_ = false;
     dr_max_w_ = 0; dr_max_h_ = 0;
     requires_content_ = false; content_loaded_ = false;
+    if (audio_) { audio_->close(); audio_.reset(); }
+    audio_frames_ = 0; audio_nonsilent_ = false;
     return RP_OK;
 }
 
@@ -176,6 +202,7 @@ rp_result Runtime::load_content(const char* path) {
     dr_max_w_ = std::max(av.max_width, av.base_width);
     dr_max_h_ = std::max(av.max_height, av.base_height);
     content_loaded_ = true;
+    open_audio(av);
     return RP_OK;
 }
 
@@ -228,5 +255,10 @@ void rp_runtime_set_input(rp_runtime* rt, const rp_input_state* in) {
 }
 rp_result rp_runtime_present(rp_runtime* rt, uint8_t* out_rgba) {
     return reinterpret_cast<Runtime*>(rt)->present(out_rgba);
+}
+void rp_runtime_audio_stats(rp_runtime* rt, uint64_t* frames_out, int* nonsilent_out) {
+    auto* r = reinterpret_cast<Runtime*>(rt);
+    if (frames_out) *frames_out = r->audio_frames();
+    if (nonsilent_out) *nonsilent_out = r->audio_nonsilent() ? 1 : 0;
 }
 }

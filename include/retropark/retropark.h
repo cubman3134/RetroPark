@@ -23,6 +23,10 @@ void        rp_runtime_set_input(rp_runtime* rt, const rp_input_state* in);
 /* Composite latest core frame + overlay; if out_rgba != NULL copies the RGBA8 image. */
 rp_result   rp_runtime_present(rp_runtime* rt, uint8_t* out_rgba);
 
+/* Diagnostics for the audio path (test/telemetry): frames_out = total stereo frames the runtime
+   received from the core since load; nonsilent_out = 1 if any non-near-zero sample was seen. */
+void rp_runtime_audio_stats(rp_runtime* rt, uint64_t* frames_out, int* nonsilent_out);
+
 #ifdef __cplusplus
 }
 #endif
