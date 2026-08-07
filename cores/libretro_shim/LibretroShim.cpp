@@ -45,7 +45,7 @@ struct Shim {
     std::vector<uint8_t> rom;       // content buffer
     std::string sys_dir;            // returned to the core (writable path)
     bool game_loaded = false;
-    rp_input_state input{};         // last input snapshot from RetroPark
+    rp_input_state input[2]{};      // last input snapshot from RetroPark, per port
     // Core option defaults captured from RETRO_ENVIRONMENT_SET_VARIABLES (legacy variable
     // API), keyed by option key. Populated once at retro_set_environment-driven negotiation,
     // before retro_load_game; answered back verbatim on GET_VARIABLE (see below).
@@ -187,21 +187,28 @@ void video_cb(const void* data, unsigned w, unsigned h, size_t pitch) {
 }
 
 void input_poll_cb() {
-    if (g) g->host.input_state(g->host.host, &g->input);
+    if (g) {
+        g->host.input_state(g->host.host, 0, &g->input[0]);
+        g->host.input_state(g->host.host, 1, &g->input[1]);
+    }
 }
 
+// Map RetroPark rp_input_state.keys[] (VK codes) to NES buttons, per port. Both ports
+// currently read the same VK keys -- that's fine; netplay feeds each port a distinct
+// rp_input_state, so port 0 and port 1 diverge by what the runtime stores, not by key
+// mapping. Local keyboard control of P2 in the harness is out of scope.
 int16_t input_state_cb(unsigned port, unsigned device, unsigned, unsigned id) {
-    if (port != 0 || device != RETRO_DEVICE_JOYPAD || !g) return 0;
-    // Map RetroPark rp_input_state.keys[] (VK codes) to NES buttons.
+    if ((port != 0 && port != 1) || device != RETRO_DEVICE_JOYPAD || !g) return 0;
+    const rp_input_state& in = g->input[port];
     switch (id) {
-        case RETRO_DEVICE_ID_JOYPAD_UP:     return g->input.keys[VK_UP]     ? 1 : 0;
-        case RETRO_DEVICE_ID_JOYPAD_DOWN:   return g->input.keys[VK_DOWN]   ? 1 : 0;
-        case RETRO_DEVICE_ID_JOYPAD_LEFT:   return g->input.keys[VK_LEFT]   ? 1 : 0;
-        case RETRO_DEVICE_ID_JOYPAD_RIGHT:  return g->input.keys[VK_RIGHT]  ? 1 : 0;
-        case RETRO_DEVICE_ID_JOYPAD_A:      return g->input.keys['X']       ? 1 : 0;
-        case RETRO_DEVICE_ID_JOYPAD_B:      return g->input.keys['Z']       ? 1 : 0;
-        case RETRO_DEVICE_ID_JOYPAD_START:  return g->input.keys[VK_RETURN] ? 1 : 0;
-        case RETRO_DEVICE_ID_JOYPAD_SELECT: return g->input.keys[VK_SHIFT]  ? 1 : 0;
+        case RETRO_DEVICE_ID_JOYPAD_UP:     return in.keys[VK_UP]     ? 1 : 0;
+        case RETRO_DEVICE_ID_JOYPAD_DOWN:   return in.keys[VK_DOWN]   ? 1 : 0;
+        case RETRO_DEVICE_ID_JOYPAD_LEFT:   return in.keys[VK_LEFT]   ? 1 : 0;
+        case RETRO_DEVICE_ID_JOYPAD_RIGHT:  return in.keys[VK_RIGHT]  ? 1 : 0;
+        case RETRO_DEVICE_ID_JOYPAD_A:      return in.keys['X']       ? 1 : 0;
+        case RETRO_DEVICE_ID_JOYPAD_B:      return in.keys['Z']       ? 1 : 0;
+        case RETRO_DEVICE_ID_JOYPAD_START:  return in.keys[VK_RETURN] ? 1 : 0;
+        case RETRO_DEVICE_ID_JOYPAD_SELECT: return in.keys[VK_SHIFT]  ? 1 : 0;
         default: return 0;
     }
 }

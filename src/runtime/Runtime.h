@@ -21,7 +21,7 @@ public:
     rp_result unload_core();
     rp_result load_content(const char* path);
     rp_result resize(uint32_t w, uint32_t h);
-    void set_input(const rp_input_state& in);
+    void set_input(uint32_t port, const rp_input_state& in);
     rp_result present(uint8_t* out_rgba);
     size_t serialize_size();
     rp_result save_state(void* buf, size_t size);
@@ -31,7 +31,7 @@ public:
 
     // Host-iface trampolines.
     void on_submit(uint32_t index, uint64_t generation, uint64_t sync_value);
-    void on_input(rp_input_state* out);
+    void on_input(uint32_t port, rp_input_state* out);
     void on_video_refresh(const void* data, uint32_t w, uint32_t h, uint32_t pitch);
     void on_audio_sample(const int16_t* frames, size_t num_frames);
 
@@ -49,7 +49,7 @@ private:
     CoreLoader loader_;
     SurfaceRing ring_{3};
     rp_host_iface host_iface_{};
-    rp_input_state input_{};
+    rp_input_state input_[2]{};
     std::mutex input_mtx_;
     uint32_t width_ = 64, height_ = 64;
     bool core_loaded_ = false;

@@ -15,8 +15,8 @@ static void host_log(rp_host*, int, const char*) {}
 static void host_submit(rp_host* h, uint32_t i, uint64_t g, uint64_t sv) {
     reinterpret_cast<Runtime*>(h)->on_submit(i, g, sv);
 }
-static void host_input(rp_host* h, rp_input_state* out) {
-    reinterpret_cast<Runtime*>(h)->on_input(out);
+static void host_input(rp_host* h, uint32_t port, rp_input_state* out) {
+    reinterpret_cast<Runtime*>(h)->on_input(port, out);
 }
 static void host_video_refresh(rp_host* h, const void* d, uint32_t w, uint32_t hh, uint32_t p) {
     reinterpret_cast<Runtime*>(h)->on_video_refresh(d, w, hh, p);
@@ -46,13 +46,13 @@ Runtime::~Runtime() { unload_core(); }
 void Runtime::on_submit(uint32_t index, uint64_t generation, uint64_t sync_value) {
     ring_.accept_submit(index, generation, sync_value);
 }
-void Runtime::on_input(rp_input_state* out) {
+void Runtime::on_input(uint32_t port, rp_input_state* out) {
     std::lock_guard<std::mutex> lk(input_mtx_);
-    *out = input_;
+    *out = input_[port & 1u];               // clamp to {0,1}
 }
-void Runtime::set_input(const rp_input_state& in) {
+void Runtime::set_input(uint32_t port, const rp_input_state& in) {
     std::lock_guard<std::mutex> lk(input_mtx_);
-    input_ = in;
+    input_[port & 1u] = in;
 }
 void Runtime::on_video_refresh(const void* data, uint32_t w, uint32_t h, uint32_t pitch) {
     dr_have_ = true;
@@ -315,8 +315,8 @@ rp_result rp_runtime_load_content(rp_runtime* rt, const char* path) {
 rp_result rp_runtime_resize(rp_runtime* rt, uint32_t w, uint32_t h) {
     return reinterpret_cast<Runtime*>(rt)->resize(w, h);
 }
-void rp_runtime_set_input(rp_runtime* rt, const rp_input_state* in) {
-    if (in) reinterpret_cast<Runtime*>(rt)->set_input(*in);
+void rp_runtime_set_input(rp_runtime* rt, uint32_t port, const rp_input_state* in) {
+    if (in) reinterpret_cast<Runtime*>(rt)->set_input(port, *in);
 }
 rp_result rp_runtime_present(rp_runtime* rt, uint8_t* out_rgba) {
     return reinterpret_cast<Runtime*>(rt)->present(out_rgba);

@@ -52,7 +52,7 @@ TEST_CASE("audio flow: FCEUmm produces a plausible non-silent stereo stream") {
     const uint64_t kMinAudioFrames = 20000;
     for (int i = 0; i < kMaxAdvance; ++i) {
         in.keys[0x0D] = (i % 50 < 4) ? 1 : 0;   // VK_RETURN = Start, tapped briefly every ~50 frames
-        rp_runtime_set_input(rt, &in);
+        rp_runtime_set_input(rt, 0, &in);
         rp_runtime_present(rt, img.data());
         if (i % 20 == 0) {
             rp_runtime_audio_stats(rt, &frames, &nonsilent);
