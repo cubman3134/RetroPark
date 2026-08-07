@@ -57,13 +57,21 @@ struct Shim {
 // default forever (e.g. FCEUmm's sndvolume stays 0 => silent output despite a real audio
 // stream being paced and forwarded). Extract the "<default>" token so GET_VARIABLE can hand
 // it back and cores initialize the way any real libretro frontend would leave them.
-std::string first_option_value(const std::string& value) {
+//
+// Returns false (out untouched) when 'value' has no ';' separator — a malformed,
+// spec-violating declaration with no parseable default token. The caller must NOT store
+// an entry for such a key: GET_VARIABLE needs to fall through to its "no such variable"
+// answer (value=nullptr, false) rather than hand the core a bogus empty-string override.
+// Well-formed libretro declarations always contain ';', so this never affects a
+// conforming core's real defaults.
+bool first_option_value(const std::string& value, std::string& out) {
     size_t semi = value.find(';');
-    if (semi == std::string::npos) return {};
+    if (semi == std::string::npos) return false;
     size_t start = semi + 1;
     while (start < value.size() && value[start] == ' ') ++start;
     size_t bar = value.find('|', start);
-    return value.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
+    out = value.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
+    return true;
 }
 
 // libretro's callbacks (env_cb, video_cb, input_poll_cb, ...) are global C functions with
@@ -132,7 +140,10 @@ bool env_cb(unsigned cmd, void* data) {
             const auto* vars = static_cast<const retro_variable*>(data);
             if (vars) {
                 for (; vars->key; ++vars) {
-                    if (vars->value) g->option_defaults[vars->key] = first_option_value(vars->value);
+                    std::string def;
+                    if (vars->value && first_option_value(vars->value, def)) {
+                        g->option_defaults[vars->key] = def;
+                    }
                 }
             }
             return true;

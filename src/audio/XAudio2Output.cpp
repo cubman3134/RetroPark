@@ -17,6 +17,7 @@ struct VoiceCB : public IXAudio2VoiceCallback {
 XAudio2Output::~XAudio2Output() { close(); }
 
 rp_result XAudio2Output::open(uint32_t sample_rate, uint32_t channels, std::string& err) {
+    close();   // guard against double-open: tear down any prior live instance first (idempotent/null-safe)
     channels_ = channels;
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     // Only S_OK means WE newly initialized COM on this thread; S_FALSE (already

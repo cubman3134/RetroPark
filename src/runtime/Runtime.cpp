@@ -63,6 +63,9 @@ void Runtime::on_audio_sample(const int16_t* frames, size_t n) {
     if (!frames || n == 0) return;
     audio_frames_ += n;
     if (!audio_nonsilent_) {
+        // n * 2: stereo-only pipeline contract — open_audio() always opens channels = 2 and
+        // the shim forwards interleaved stereo, so each of the n frames is 2 int16 samples.
+        // Revisit this scan if a mono path is ever added.
         for (size_t i = 0; i < n * 2; ++i) { int16_t s = frames[i]; if (s > 128 || s < -128) { audio_nonsilent_ = true; break; } }
     }
     if (audio_) audio_->submit(frames, n);
