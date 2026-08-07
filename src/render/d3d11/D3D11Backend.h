@@ -15,12 +15,22 @@ public:
                                 std::vector<rp_surface_desc>& out, std::string& err) override;
     rp_result composite_and_present(uint32_t ready_index, uint64_t sync_value, bool has_frame,
                                     uint8_t* out_rgba, std::string& err) override;
+    rp_result composite_driven(const void*, uint32_t, uint32_t, uint32_t, bool, uint8_t*, std::string& err) override;
 
     // Test helpers.
     static bool probe_shared_keyed_mutex();
     rp_result readback_surface_pixel(uint32_t index, uint32_t x, uint32_t y,
                                      uint8_t rgba_out[4], std::string& err);
     ID3D11Device* device() const { return device_.Get(); }
+
+private:
+    // Lazily creates offscreen_/offscreen_rtv_ sized to width_/height_, if not already
+    // present. Shared by composite_and_present() and composite_driven().
+    rp_result ensure_offscreen_target(std::string& err);
+    // Copies the current offscreen_ render target into out_rgba (display-sized,
+    // width_ x height_) via a staging texture. Shared by composite_and_present() and
+    // composite_driven().
+    rp_result read_back_target(uint8_t* out_rgba, std::string& err);
 
 protected:
     struct Surface {
@@ -70,5 +80,11 @@ protected:
     Microsoft::WRL::ComPtr<ID3D11Texture2D> offscreen_;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> offscreen_rtv_;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> backbuffer_rtv_;   // set when swapchain_ is non-null
+
+    // Driven-model CPU upload target for composite_driven(); recreated when the
+    // requested width/height changes. driven_srv_ is reused across dupe==true calls.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> driven_tex_;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> driven_srv_;
+    uint32_t driven_w_ = 0, driven_h_ = 0;
 };
 }

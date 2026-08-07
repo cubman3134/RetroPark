@@ -6,6 +6,7 @@ add_executable(retropark_tests
   test_loader.cpp
   test_loader_ffi.cpp
   test_surface_ring.cpp
+  test_framebuffer_copy.cpp
   test_backend_iface.cpp
   test_d3d11_handoff.cpp
   test_compositor.cpp
@@ -16,7 +17,10 @@ add_executable(retropark_tests
   test_vulkan_device.cpp
   test_vulkan_handoff.cpp
   test_vulkan_compositor.cpp
-  test_vulkan_e2e.cpp)
+  test_vulkan_e2e.cpp
+  test_driven_upload_d3d11.cpp
+  test_driven_upload_vulkan.cpp
+  test_driven_e2e.cpp)
 target_link_libraries(retropark_tests PRIVATE retropark doctest::doctest nlohmann_json::nlohmann_json)
 target_include_directories(retropark_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
@@ -45,3 +49,9 @@ target_compile_definitions(retropark_tests PRIVATE
 add_dependencies(retropark_tests refcore_present_vk)
 target_compile_definitions(retropark_tests PRIVATE
   RP_VK_CORE_DIR="$<TARGET_FILE_DIR:refcore_present_vk>/cores/refcore_present_vk")
+
+# driven e2e test loads the real reference driven core built by cores/refcore_driven;
+# depend on it and tell the test where its DLL + core.json land.
+add_dependencies(retropark_tests refcore_driven)
+target_compile_definitions(retropark_tests PRIVATE
+  RP_DRIVEN_CORE_DIR="$<TARGET_FILE_DIR:refcore_driven>/cores/refcore_driven")

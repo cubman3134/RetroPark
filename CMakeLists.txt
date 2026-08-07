@@ -29,7 +29,8 @@ add_library(retropark STATIC
   src/loader/Manifest.cpp
   src/loader/CoreLoader.cpp
   src/loader/Win32CoreModule.cpp
-  src/render/SurfaceRing.cpp)
+  src/render/SurfaceRing.cpp
+  src/render/FramebufferCopy.cpp)
 target_sources(retropark PRIVATE
   src/render/d3d11/D3D11Backend.cpp
   src/render/d3d11/D3D11Compositor.cpp
@@ -63,6 +64,7 @@ target_include_directories(retropark PRIVATE "${VK_GEN_DIR}")
 
 add_subdirectory(cores/refcore_present)
 add_subdirectory(cores/refcore_present_vk)
+add_subdirectory(cores/refcore_driven)
 add_subdirectory(harness/windowed)
 
 enable_testing()

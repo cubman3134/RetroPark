@@ -43,3 +43,11 @@ TEST_CASE("manifest: malformed json rejected") {
     CoreManifest m; std::string err;
     CHECK(parse_manifest("{not json", m, err) == RP_ERR_BAD_ARG);
 }
+
+TEST_CASE("manifest: graphics_api none is accepted (driven cores)") {
+    CoreManifest m; std::string err;
+    const char* j = R"({"id":"d","name":"n","type":"driven","abi_version":3,
+                        "graphics_api":"none","entry":"d.dll"})";
+    CHECK(parse_manifest(j, m, err) == RP_OK);
+    CHECK(m.graphics_api == RP_GFX_NONE);
+}

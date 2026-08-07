@@ -17,19 +17,28 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 #ifndef RP_HARNESS_CORE_DIR_VK
 #define RP_HARNESS_CORE_DIR_VK "cores/refcore_present_vk"
 #endif
+#ifndef RP_HARNESS_DRIVEN_CORE_DIR
+#define RP_HARNESS_DRIVEN_CORE_DIR "cores/refcore_driven"
+#endif
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
-    // Parse `--api vulkan|d3d11` (default d3d11) from the process command line.
+    // Parse `--api vulkan|d3d11` (default d3d11) and `--driven` from the process command line.
     bool use_vulkan = false;
+    bool use_driven = false;
     {
         std::wstring cmd = GetCommandLineW() ? GetCommandLineW() : L"";
         if (cmd.find(L"--api vulkan") != std::wstring::npos ||
             cmd.find(L"--api=vulkan") != std::wstring::npos) {
             use_vulkan = true;
         }
+        if (cmd.find(L"--driven") != std::wstring::npos) {
+            use_driven = true;
+        }
     }
     const rp_graphics_api api = use_vulkan ? RP_GFX_VULKAN : RP_GFX_D3D11;
-    const char* core_dir = use_vulkan ? RP_HARNESS_CORE_DIR_VK : RP_HARNESS_CORE_DIR;
+    const char* core_dir = use_driven
+        ? RP_HARNESS_DRIVEN_CORE_DIR
+        : (use_vulkan ? RP_HARNESS_CORE_DIR_VK : RP_HARNESS_CORE_DIR);
 
     WNDCLASSW wc{}; wc.lpfnWndProc = WndProc; wc.hInstance = hInst; wc.lpszClassName = L"RetroParkHarness";
     RegisterClassW(&wc);

@@ -186,7 +186,7 @@ rp_result VulkanCompositor::initialize(VkDevice dev, VkFormat color_format, std:
 }
 
 rp_result VulkanCompositor::render(VkCommandBuffer cmd, VkImageView targetView, VkImageView coreView,
-                                   uint32_t w, uint32_t h, std::string& err) {
+                                   uint32_t w, uint32_t h, std::string& err, VkImageLayout coreLayout) {
     if (!framebuffer_ || fb_view_ != targetView || fb_w_ != w || fb_h_ != h) {
         if (framebuffer_) { vkDestroyFramebuffer(dev_, framebuffer_, nullptr); framebuffer_ = VK_NULL_HANDLE; }
         VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
@@ -213,7 +213,7 @@ rp_result VulkanCompositor::render(VkCommandBuffer cmd, VkImageView targetView, 
     vkCmdSetScissor(cmd, 0, 1, &sc);
 
     if (coreView) {
-        VkDescriptorImageInfo dii{sampler_, coreView, VK_IMAGE_LAYOUT_GENERAL};
+        VkDescriptorImageInfo dii{sampler_, coreView, coreLayout};
         VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         write.dstSet = desc_set_; write.dstBinding = 0; write.descriptorCount = 1;
         write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;

@@ -12,11 +12,14 @@ public:
     rp_result initialize(VkDevice dev, VkFormat color_format, std::string& err);
 
     // Records into `cmd`: begins its own render pass against `targetView` (w x h,
-    // cleared to black); if `coreView` is non-null, samples it (expected layout
-    // GENERAL) via the fullscreen triangle; then draws the blended overlay quad;
+    // cleared to black); if `coreView` is non-null, samples it via the fullscreen
+    // triangle (in the layout given by `coreLayout` — GENERAL for the presenting
+    // path's shared images, SHADER_READ_ONLY_OPTIMAL for a normal sampled image
+    // like the driven-model upload target); then draws the blended overlay quad;
     // ends the render pass. Does not submit.
     rp_result render(VkCommandBuffer cmd, VkImageView targetView, VkImageView coreView,
-                     uint32_t w, uint32_t h, std::string& err);
+                     uint32_t w, uint32_t h, std::string& err,
+                     VkImageLayout coreLayout = VK_IMAGE_LAYOUT_GENERAL);
 
     // Reverse-order teardown of everything created in initialize(). Safe to call on
     // a partially-built or never-initialized compositor.

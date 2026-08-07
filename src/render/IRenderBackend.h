@@ -13,6 +13,9 @@ struct IRenderBackend {
     // If out_rgba != null, the composited image (w*h*4, RGBA8) is copied there (headless).
     virtual rp_result composite_and_present(uint32_t ready_index, uint64_t sync_value, bool has_frame,
                                             uint8_t* out_rgba, std::string& err) = 0;
+    virtual rp_result composite_driven(const void* data, uint32_t width, uint32_t height,
+                                       uint32_t pitch, bool dupe, uint8_t* out_rgba,
+                                       std::string& err) = 0;
 
     // External-sync accessors (Vulkan; default no-op for backends without external sync).
     virtual void* present_sync_handle() const { return nullptr; }

@@ -45,6 +45,20 @@ rp_result CoreLoader::stop(std::string& error) {
     return r;
 }
 
+rp_result CoreLoader::run_frame(std::string& error) {
+    if (state_ != LoaderState::Created && state_ != LoaderState::Started) { error = "run_frame needs Created"; return RP_ERR_INTERNAL; }
+    if (!abi_->run_frame) { error = "core has no run_frame"; return RP_ERR_UNSUPPORTED; }
+    abi_->run_frame(core_);
+    return RP_OK;
+}
+
+rp_result CoreLoader::get_av_info(rp_av_info* out, std::string& error) {
+    if (state_ != LoaderState::Created && state_ != LoaderState::Started) { error = "get_av_info needs Created"; return RP_ERR_INTERNAL; }
+    if (!abi_->get_av_info) { error = "core has no get_av_info"; return RP_ERR_UNSUPPORTED; }
+    abi_->get_av_info(core_, out);
+    return RP_OK;
+}
+
 void CoreLoader::destroy() {
     if (state_ == LoaderState::Started) { std::string e; stop(e); }
     if (core_ && abi_ && abi_->destroy) abi_->destroy(core_);

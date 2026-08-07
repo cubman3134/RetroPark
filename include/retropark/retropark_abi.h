@@ -2,12 +2,13 @@
 #define RETROPARK_ABI_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define RETROPARK_ABI_VERSION 2u
+#define RETROPARK_ABI_VERSION 3u
 #define RP_CORE_ABI_EXPORT_NAME "rp_get_core_abi"
 
 typedef enum rp_result {
@@ -28,7 +29,8 @@ typedef enum rp_core_type {
 
 typedef enum rp_graphics_api {
     RP_GFX_D3D11 = 0,
-    RP_GFX_VULKAN = 1           /* later slice */
+    RP_GFX_VULKAN = 1,
+    RP_GFX_NONE = 2             /* driven cores: no host-managed swapchain */
 } rp_graphics_api;
 
 typedef enum rp_pixel_format {
@@ -61,11 +63,20 @@ typedef struct rp_input_state {
     uint16_t pad_buttons;
 } rp_input_state;
 
+typedef struct rp_av_info {
+    double   fps;
+    double   sample_rate;
+    uint32_t base_width, base_height, max_width, max_height;
+    uint32_t pixel_format;      /* rp_pixel_format */
+} rp_av_info;
+
 typedef struct rp_host_iface {
     rp_host* host;
     void (*log)(rp_host* host, int level, const char* msg);
     void (*submit_frame)(rp_host* host, uint32_t index, uint64_t generation, uint64_t sync_value);
     void (*input_state)(rp_host* host, rp_input_state* out);
+    void (*video_refresh)(rp_host* host, const void* data, uint32_t width, uint32_t height, uint32_t pitch);
+    void (*audio_sample)(rp_host* host, const int16_t* frames, size_t num_frames);
 } rp_host_iface;
 
 typedef struct rp_core_info {
@@ -83,6 +94,11 @@ typedef struct rp_core_abi {
     rp_result (*set_surfaces)(rp_core* core, const rp_surface_set* set);
     rp_result (*start)(rp_core* core);
     rp_result (*stop)(rp_core* core);
+    void      (*get_av_info)(rp_core* core, rp_av_info* out);
+    void      (*run_frame)(rp_core* core);
+    size_t    (*serialize_size)(rp_core* core);
+    rp_result (*serialize)(rp_core* core, void* data, size_t size);
+    rp_result (*unserialize)(rp_core* core, const void* data, size_t size);
 } rp_core_abi;
 
 typedef const rp_core_abi* (*rp_get_core_abi_fn)(void);

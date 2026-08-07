@@ -22,6 +22,7 @@ public:
     // Host-iface trampolines.
     void on_submit(uint32_t index, uint64_t generation, uint64_t sync_value);
     void on_input(rp_input_state* out);
+    void on_video_refresh(const void* data, uint32_t w, uint32_t h, uint32_t pitch);
 
 private:
     rp_result rebuild_surfaces(std::string& err);
@@ -38,5 +39,10 @@ private:
     uint32_t width_ = 64, height_ = 64;
     bool core_loaded_ = false;
     bool init_ok_ = false;
+    rp_core_type core_type_ = RP_CORE_PRESENTING;
+    const void* dr_data_ = nullptr;
+    uint32_t dr_w_ = 0, dr_h_ = 0, dr_pitch_ = 0;
+    bool dr_dupe_ = false, dr_have_ = false;
+    uint32_t dr_max_w_ = 0, dr_max_h_ = 0;
 };
 }
