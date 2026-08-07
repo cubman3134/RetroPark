@@ -7,6 +7,7 @@
 #include "loader/Win32CoreModule.h"
 #include "render/SurfaceRing.h"
 #include "render/IRenderBackend.h"
+#include "audio/IAudioOutput.h"
 
 namespace rp {
 class Runtime {
@@ -24,9 +25,14 @@ public:
     void on_submit(uint32_t index, uint64_t generation, uint64_t sync_value);
     void on_input(rp_input_state* out);
     void on_video_refresh(const void* data, uint32_t w, uint32_t h, uint32_t pitch);
+    void on_audio_sample(const int16_t* frames, size_t num_frames);
+
+    uint64_t audio_frames() const { return audio_frames_; }
+    bool audio_nonsilent() const { return audio_nonsilent_; }
 
 private:
     rp_result rebuild_surfaces(std::string& err);
+    void open_audio(const rp_av_info& av);
 
     void* native_window_ = nullptr;
     rp_graphics_api api_;
@@ -47,5 +53,8 @@ private:
     uint32_t dr_max_w_ = 0, dr_max_h_ = 0;
     bool requires_content_ = false;
     bool content_loaded_ = false;
+    std::unique_ptr<IAudioOutput> audio_;
+    uint64_t audio_frames_ = 0;
+    bool audio_nonsilent_ = false;
 };
 }
