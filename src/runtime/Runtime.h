@@ -20,6 +20,9 @@ public:
     rp_result resize(uint32_t w, uint32_t h);
     void set_input(const rp_input_state& in);
     rp_result present(uint8_t* out_rgba);
+    size_t serialize_size();
+    rp_result save_state(void* buf, size_t size);
+    rp_result load_state(const void* buf, size_t size);
 
     // Host-iface trampolines.
     void on_submit(uint32_t index, uint64_t generation, uint64_t sync_value);

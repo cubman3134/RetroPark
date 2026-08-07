@@ -228,6 +228,26 @@ rp_result Runtime::present(uint8_t* out_rgba) {
     return backend_->composite_and_present(idx, sv, has, out_rgba, err);
 }
 
+size_t Runtime::serialize_size() {
+    return loader_.serialize_size();
+}
+
+rp_result Runtime::save_state(void* buf, size_t size) {
+    if (!buf) return RP_ERR_BAD_ARG;
+    size_t sz = loader_.serialize_size();
+    if (sz == 0) return RP_ERR_UNSUPPORTED;
+    if (size < sz) return RP_ERR_BAD_ARG;
+    std::string err;
+    return loader_.serialize(buf, sz, err);
+}
+
+rp_result Runtime::load_state(const void* buf, size_t size) {
+    if (!buf) return RP_ERR_BAD_ARG;
+    if (size == 0) return RP_ERR_BAD_ARG;
+    std::string err;
+    return loader_.unserialize(buf, size, err);
+}
+
 } // namespace rp
 
 // ---- C API ----
@@ -260,5 +280,17 @@ void rp_runtime_audio_stats(rp_runtime* rt, uint64_t* frames_out, int* nonsilent
     auto* r = reinterpret_cast<Runtime*>(rt);
     if (frames_out) *frames_out = r->audio_frames();
     if (nonsilent_out) *nonsilent_out = r->audio_nonsilent() ? 1 : 0;
+}
+size_t rp_runtime_serialize_size(rp_runtime* rt) {
+    if (!rt) return 0;
+    return reinterpret_cast<Runtime*>(rt)->serialize_size();
+}
+rp_result rp_runtime_save_state(rp_runtime* rt, void* buf, size_t size) {
+    if (!rt || !buf) return RP_ERR_BAD_ARG;
+    return reinterpret_cast<Runtime*>(rt)->save_state(buf, size);
+}
+rp_result rp_runtime_load_state(rp_runtime* rt, const void* buf, size_t size) {
+    if (!rt || !buf) return RP_ERR_BAD_ARG;
+    return reinterpret_cast<Runtime*>(rt)->load_state(buf, size);
 }
 }

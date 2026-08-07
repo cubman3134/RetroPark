@@ -27,6 +27,19 @@ rp_result   rp_runtime_present(rp_runtime* rt, uint8_t* out_rgba);
    received from the core since load; nonsilent_out = 1 if any non-near-zero sample was seen. */
 void rp_runtime_audio_stats(rp_runtime* rt, uint64_t* frames_out, int* nonsilent_out);
 
+/* Size in bytes of the loaded core's savestate, or 0 if no core is loaded / the core does not
+   support serialization. */
+size_t rp_runtime_serialize_size(rp_runtime* rt);
+
+/* Write the loaded core's current state into buf (must be >= rp_runtime_serialize_size(rt)
+   bytes). RP_ERR_UNSUPPORTED if the core has no savestate; RP_ERR_BAD_ARG on null args or an
+   undersized buffer. */
+rp_result rp_runtime_save_state(rp_runtime* rt, void* buf, size_t size);
+
+/* Restore the loaded core's state from buf/size (as previously written by save_state). A core
+   rejecting an incompatible state surfaces as an error result, not a crash. */
+rp_result rp_runtime_load_state(rp_runtime* rt, const void* buf, size_t size);
+
 #ifdef __cplusplus
 }
 #endif
