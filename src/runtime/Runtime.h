@@ -43,5 +43,6 @@ private:
     const void* dr_data_ = nullptr;
     uint32_t dr_w_ = 0, dr_h_ = 0, dr_pitch_ = 0;
     bool dr_dupe_ = false, dr_have_ = false;
+    uint32_t dr_max_w_ = 0, dr_max_h_ = 0;
 };
 }

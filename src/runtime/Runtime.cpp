@@ -1,9 +1,11 @@
 #include "runtime/Runtime.h"
 #include "runtime/BackendFactory.h"
 #include "loader/Manifest.h"
+#include "render/FramebufferCopy.h"
 #include <fstream>
 #include <sstream>
 #include <cstring>
+#include <algorithm>
 
 namespace rp {
 
@@ -125,6 +127,10 @@ rp_result Runtime::load_core(const std::string& core_dir) {
         if (r != RP_OK) { unload_core(); return r; }
         if (!(av.base_width > 0 && av.base_height > 0)) { unload_core(); return RP_ERR_UNSUPPORTED; }
         if (av.pixel_format != RP_FMT_R8G8B8A8_UNORM) { unload_core(); return RP_ERR_UNSUPPORTED; }
+        // A core reporting max geometry smaller than its base geometry is malformed; clamp
+        // so a well-behaved base-size frame is never wrongly rejected as oversize.
+        dr_max_w_ = std::max(av.max_width, av.base_width);
+        dr_max_h_ = std::max(av.max_height, av.base_height);
         return RP_OK;
     }
 
@@ -149,6 +155,7 @@ rp_result Runtime::unload_core() {
     core_type_ = RP_CORE_PRESENTING;
     dr_data_ = nullptr; dr_w_ = 0; dr_h_ = 0; dr_pitch_ = 0;
     dr_dupe_ = false; dr_have_ = false;
+    dr_max_w_ = 0; dr_max_h_ = 0;
     return RP_OK;
 }
 
@@ -159,8 +166,13 @@ rp_result Runtime::present(uint8_t* out_rgba) {
         dr_have_ = false;
         rp_result r = loader_.run_frame(err);
         if (r != RP_OK) return r;
-        bool dupe = !dr_have_ || dr_dupe_;
-        return backend_->composite_driven(dr_dupe_ ? nullptr : dr_data_,
+        // Spec §4: a frame with a too-small pitch or dimensions beyond the core's declared
+        // max geometry is skipped (treated as a duplicate of the last good frame) rather
+        // than uploaded.
+        bool valid = dr_have_ && !dr_dupe_ &&
+                     driven_frame_valid(dr_w_, dr_h_, dr_pitch_, dr_max_w_, dr_max_h_);
+        bool dupe = !valid;
+        return backend_->composite_driven(valid ? dr_data_ : nullptr,
                                           dr_w_, dr_h_, dr_pitch_, dupe, out_rgba, err);
     }
     uint32_t idx = 0; uint64_t sv = 0;
