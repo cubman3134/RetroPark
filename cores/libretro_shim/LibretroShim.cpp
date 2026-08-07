@@ -36,6 +36,9 @@ struct Shim {
     bool     (*retro_load_game)(const retro_game_info*) = nullptr;
     void     (*retro_unload_game)() = nullptr;
     void     (*retro_run)() = nullptr;
+    size_t   (*retro_serialize_size)() = nullptr;
+    bool     (*retro_serialize)(void*, size_t) = nullptr;
+    bool     (*retro_unserialize)(const void*, size_t) = nullptr;
     // state
     unsigned pixel_format = RETRO_PIXEL_FORMAT_0RGB1555;   // libretro default
     std::vector<uint8_t> rgba;      // converted frame
@@ -306,6 +309,9 @@ rp_core* sh_create(const rp_host_iface* host) {
     load_fn(s, s->retro_load_game, "retro_load_game");
     load_fn(s, s->retro_unload_game, "retro_unload_game");
     load_fn(s, s->retro_run, "retro_run");
+    load_fn(s, s->retro_serialize_size, "retro_serialize_size");
+    load_fn(s, s->retro_serialize, "retro_serialize");
+    load_fn(s, s->retro_unserialize, "retro_unserialize");
 
     if (!s->retro_api_version || s->retro_api_version() != RETRO_API_VERSION ||
         !s->retro_run || !s->retro_load_game || !s->retro_set_environment ||
@@ -365,6 +371,23 @@ void sh_run_frame(rp_core* core) {
     if (s->game_loaded) s->retro_run();
 }
 
+size_t sh_serialize_size(rp_core* core) {
+    auto* s = reinterpret_cast<Shim*>(core);
+    return s->retro_serialize_size ? s->retro_serialize_size() : 0;
+}
+
+rp_result sh_serialize(rp_core* core, void* data, size_t size) {
+    auto* s = reinterpret_cast<Shim*>(core);
+    if (!s->retro_serialize) return RP_ERR_UNSUPPORTED;
+    return s->retro_serialize(data, size) ? RP_OK : RP_ERR_UNSUPPORTED;
+}
+
+rp_result sh_unserialize(rp_core* core, const void* data, size_t size) {
+    auto* s = reinterpret_cast<Shim*>(core);
+    if (!s->retro_unserialize) return RP_ERR_UNSUPPORTED;
+    return s->retro_unserialize(data, size) ? RP_OK : RP_ERR_UNSUPPORTED;
+}
+
 void sh_destroy(rp_core* core) {
     auto* s = reinterpret_cast<Shim*>(core);
     if (s->game_loaded && s->retro_unload_game) s->retro_unload_game();
@@ -378,7 +401,7 @@ const rp_core_abi kAbi = {
     RETROPARK_ABI_VERSION, sh_get_info, sh_create, sh_destroy,
     nullptr, nullptr, nullptr,          // set_surfaces, start, stop
     sh_get_av_info, sh_run_frame,
-    nullptr, nullptr, nullptr,          // serialize_size, serialize, unserialize
+    sh_serialize_size, sh_serialize, sh_unserialize,
     sh_load_content
 };
 

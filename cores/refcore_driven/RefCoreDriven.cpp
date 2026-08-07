@@ -1,5 +1,6 @@
 #include <retropark/retropark_abi.h>
 #include <vector>
+#include <cstring>
 #define RP_EXPORT extern "C" __declspec(dllexport)
 
 namespace {
@@ -39,11 +40,27 @@ void dc_run_frame(rp_core* core) {
     c->host.video_refresh(c->host.host, c->fb.data(), DrivenCore::W, DrivenCore::H, DrivenCore::W * 4);
 }
 
+// The frame counter is the entirety of this core's animation state (dc_run_frame derives
+// every pixel from it), so a 4-byte uint32_t snapshot is a complete, portable savestate.
+size_t dc_serialize_size(rp_core*) { return sizeof(uint32_t); }
+rp_result dc_serialize(rp_core* core, void* data, size_t size) {
+    if (!data || size < sizeof(uint32_t)) return RP_ERR_BAD_ARG;
+    auto* c = reinterpret_cast<DrivenCore*>(core);
+    std::memcpy(data, &c->frame, sizeof(uint32_t));
+    return RP_OK;
+}
+rp_result dc_unserialize(rp_core* core, const void* data, size_t size) {
+    if (!data || size < sizeof(uint32_t)) return RP_ERR_BAD_ARG;
+    auto* c = reinterpret_cast<DrivenCore*>(core);
+    std::memcpy(&c->frame, data, sizeof(uint32_t));
+    return RP_OK;
+}
+
 const rp_core_abi kAbi = {
     RETROPARK_ABI_VERSION, dc_get_info, dc_create, dc_destroy,
     /*set_surfaces*/nullptr, /*start*/nullptr, /*stop*/nullptr,
     dc_get_av_info, dc_run_frame,
-    /*serialize_size*/nullptr, /*serialize*/nullptr, /*unserialize*/nullptr
+    dc_serialize_size, dc_serialize, dc_unserialize
 };
 }
 RP_EXPORT const rp_core_abi* rp_get_core_abi(void) { return &kAbi; }
