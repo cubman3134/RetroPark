@@ -148,8 +148,15 @@ int16_t input_state_cb(unsigned port, unsigned device, unsigned, unsigned id) {
     }
 }
 
-void   audio_cb(int16_t, int16_t) {}                                   // dropped
-size_t audio_batch_cb(const int16_t*, size_t frames) { return frames; } // dropped
+// per-sample: forward one stereo frame.
+void audio_cb(int16_t left, int16_t right) {
+    if (g) { int16_t pair[2] = {left, right}; g->host.audio_sample(g->host.host, pair, 1); }
+}
+// batch: interleaved stereo int16, `frames` stereo frames. Forward straight through.
+size_t audio_batch_cb(const int16_t* data, size_t frames) {
+    if (g && data && frames) g->host.audio_sample(g->host.host, data, frames);
+    return frames;
+}
 
 // Directory of THIS dll (used to self-locate core.json and the libretro core).
 std::wstring shim_dir() {
