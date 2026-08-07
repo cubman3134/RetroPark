@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define RETROPARK_ABI_VERSION 4u
+#define RETROPARK_ABI_VERSION 5u  /* was 4 -- input_state gains a port (Slice G netplay) */
 #define RP_CORE_ABI_EXPORT_NAME "rp_get_core_abi"
 
 typedef enum rp_result {
@@ -74,7 +74,7 @@ typedef struct rp_host_iface {
     rp_host* host;
     void (*log)(rp_host* host, int level, const char* msg);
     void (*submit_frame)(rp_host* host, uint32_t index, uint64_t generation, uint64_t sync_value);
-    void (*input_state)(rp_host* host, rp_input_state* out);
+    void (*input_state)(rp_host* host, uint32_t port, rp_input_state* out);
     void (*video_refresh)(rp_host* host, const void* data, uint32_t width, uint32_t height, uint32_t pitch);
     void (*audio_sample)(rp_host* host, const int16_t* frames, size_t num_frames);
 } rp_host_iface;

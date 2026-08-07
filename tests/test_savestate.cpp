@@ -49,7 +49,7 @@ using namespace rp;
 namespace {
 void noop_log(rp_host*, int, const char*) {}
 void noop_submit(rp_host*, uint32_t, uint64_t, uint64_t) {}
-void noop_input(rp_host*, rp_input_state* out) { *out = rp_input_state{}; }
+void noop_input(rp_host*, uint32_t, rp_input_state* out) { *out = rp_input_state{}; }
 void noop_video(rp_host*, const void*, uint32_t, uint32_t, uint32_t) {}
 void noop_audio(rp_host*, const int16_t*, size_t) {}
 

@@ -39,14 +39,18 @@ target_sources(retropark PRIVATE
   src/runtime/BackendFactory.cpp
   src/runtime/Runtime.cpp
   src/audio/AudioPool.cpp
-  src/audio/XAudio2Output.cpp)
+  src/audio/XAudio2Output.cpp
+  src/net/NetProtocol.cpp
+  src/net/LoopbackTransport.cpp
+  src/net/TcpTransport.cpp
+  src/net/NetSession.cpp)
 target_include_directories(retropark PUBLIC include)
 target_include_directories(retropark PRIVATE src)
 target_compile_features(retropark PUBLIC cxx_std_17)
 target_link_libraries(retropark PUBLIC nlohmann_json::nlohmann_json)
 target_link_libraries(retropark PUBLIC Vulkan::Vulkan)
 if (WIN32)
-  target_link_libraries(retropark PUBLIC d3d11 dxgi dxguid d3dcompiler xaudio2 ole32)
+  target_link_libraries(retropark PUBLIC d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)
 endif()
 
 # Vulkan compositor shaders, embedded as SPIR-V headers (see cmake/Shaders.cmake).
