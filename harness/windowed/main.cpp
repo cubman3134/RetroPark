@@ -2,8 +2,16 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <retropark/retropark.h>
+#include "net/NetSession.h"
+#include "net/TcpTransport.h"
+#include "net/Crc32.h"
+#include "runtime/Runtime.h"
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
+#include <fstream>
+#include <iterator>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -65,6 +73,18 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 #define RP_HARNESS_SHIM_DIR "cores/libretro_shim"
 #endif
 
+// Netplay input capture: the harness normally wires no input at all (the single-player
+// cores just free-run), so netplay is the first path that needs a live local snapshot per
+// frame. Scan the whole VK range and mirror "currently down" into a rp_input_state -- simple
+// and complete (no per-game button mapping to keep in sync between two machines).
+static rp_input_state read_local_input() {
+    rp_input_state s{};
+    for (int vk = 0; vk < 256; ++vk) {
+        if (GetAsyncKeyState(vk) & 0x8000) s.keys[vk] = 1;
+    }
+    return s;
+}
+
 static std::string narrow(const std::wstring& w) {
     if (w.empty()) return {};
     int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
@@ -89,6 +109,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     bool use_vulkan = false;
     bool use_driven = false;
     std::string content_path;
+    // Netplay (manual 2-machine demo): --netplay-host <port> or --netplay-join <ip:port>.
+    bool netplay_host_flag = false;
+    bool netplay_join_flag = false;
+    std::string netplay_ip;
+    uint16_t netplay_port = 0;
     {
         int argc = 0;
         LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -103,6 +128,17 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
                     use_driven = true;
                 } else if (a == L"--content" && i + 1 < argc) {
                     content_path = narrow(argv[i + 1]);
+                } else if (a == L"--netplay-host" && i + 1 < argc) {
+                    netplay_host_flag = true;
+                    netplay_port = static_cast<uint16_t>(std::atoi(narrow(argv[i + 1]).c_str()));
+                } else if (a == L"--netplay-join" && i + 1 < argc) {
+                    netplay_join_flag = true;
+                    std::string spec = narrow(argv[i + 1]);
+                    size_t colon = spec.find(':');
+                    if (colon != std::string::npos) {
+                        netplay_ip = spec.substr(0, colon);
+                        netplay_port = static_cast<uint16_t>(std::atoi(spec.substr(colon + 1).c_str()));
+                    }
                 }
             }
             LocalFree(argv);
@@ -115,6 +151,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         : (use_driven
             ? RP_HARNESS_DRIVEN_CORE_DIR
             : (use_vulkan ? RP_HARNESS_CORE_DIR_VK : RP_HARNESS_CORE_DIR));
+    // Identifies the loaded core to the netplay handshake; both machines must load the same
+    // core and pass the same id here, or start_host/start_join reject the mismatch.
+    const char* core_id = use_content
+        ? "fceumm"
+        : (use_driven ? "refcore_driven" : (use_vulkan ? "refcore_present_vk" : "refcore_present"));
 
     WNDCLASSW wc{}; wc.lpfnWndProc = WndProc; wc.hInstance = hInst; wc.lpszClassName = L"RetroParkHarness";
     RegisterClassW(&wc);
@@ -142,6 +183,52 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     printf("[harness] keys: F5 = save state, F7 = load state, hold LEFT ARROW = rewind\n");
     fflush(stdout);
 
+    // Netplay (manual 2-machine demo): --netplay-host <port> hosts and waits for a peer to
+    // connect (blocks on accept up to its timeout -- expected when launched with no peer);
+    // --netplay-join <ip:port> connects to a host already waiting. content_hash is the ROM's
+    // crc32 (0 for a contentless core) so a mismatched ROM/core between the two machines is
+    // rejected at the handshake rather than silently desyncing later.
+    std::unique_ptr<rp::net::TcpTransport> netplay_transport;
+    rp::net::NetSession netplay_session;
+    bool netplay = false;
+    uint64_t content_hash = 0;
+    if (use_content) {
+        std::ifstream rom_f(content_path, std::ios::binary);
+        if (rom_f) {
+            std::vector<uint8_t> rom_bytes((std::istreambuf_iterator<char>(rom_f)), std::istreambuf_iterator<char>());
+            content_hash = rp::net::crc32(rom_bytes.data(), rom_bytes.size());
+        }
+    }
+    if (netplay_host_flag) {
+        std::string err;
+        rp::Runtime& rt_cpp = *reinterpret_cast<rp::Runtime*>(g_rt);
+        if (rp::net::TcpTransport::host(netplay_port, netplay_transport, err, 30000) != RP_OK) {
+            fprintf(stderr, "netplay host failed: %s\n", err.c_str());
+            return 1;
+        }
+        if (netplay_session.start_host(rt_cpp, *netplay_transport, /*delay=*/2, content_hash, core_id, err) != RP_OK) {
+            fprintf(stderr, "host handshake failed: %s\n", err.c_str());
+            return 1;
+        }
+        netplay = true;
+        printf("netplay: hosting on port %u, you are Player 1 (port 0)\n", netplay_port);
+        fflush(stdout);
+    } else if (netplay_join_flag) {
+        std::string err;
+        rp::Runtime& rt_cpp = *reinterpret_cast<rp::Runtime*>(g_rt);
+        if (rp::net::TcpTransport::join(netplay_ip.c_str(), netplay_port, netplay_transport, err) != RP_OK) {
+            fprintf(stderr, "netplay join failed: %s\n", err.c_str());
+            return 1;
+        }
+        if (netplay_session.start_join(rt_cpp, *netplay_transport, content_hash, core_id, err) != RP_OK) {
+            fprintf(stderr, "join handshake failed: %s\n", err.c_str());
+            return 1;
+        }
+        netplay = true;
+        printf("netplay: joined %s:%u, you are Player 2 (port 1)\n", netplay_ip.c_str(), netplay_port);
+        fflush(stdout);
+    }
+
     MSG msg{};
     bool running = true;
     while (running) {
@@ -149,17 +236,38 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
             if (msg.message == WM_QUIT) { running = false; break; }
             TranslateMessage(&msg); DispatchMessage(&msg);
         }
-        const bool rewinding = g_rewind_enabled && (GetAsyncKeyState(kRewindVK) & 0x8000) != 0;
-        if (rewinding) {
-            // Step one frame into the past and show it. RP_ERR_NOT_FOUND means the ring is
-            // empty (no more history) -- stop going back and hold on the current frame
-            // (skip the present this tick) rather than lurching forward again while the key
-            // is still held.
-            if (rp_runtime_rewind(g_rt) == RP_OK) {
-                rp_runtime_present(g_rt, nullptr);
+        if (netplay) {
+            rp_input_state local = read_local_input();
+            // Sends local, waits for the remote frame, advances the core with both, and
+            // presents -- rp_runtime_present() runs INSIDE tick() against this same windowed
+            // runtime (same swapchain as the single-player path below), so there is nothing
+            // further to composite/present here. Calling rp_runtime_present() again would
+            // silently advance the driven shim core an extra, un-synchronized frame per loop
+            // iteration and desync it from the peer.
+            rp::net::NetStatus st = netplay_session.tick(local);
+            if (st == rp::net::NetStatus::Desync) {
+                printf("DESYNC at frame %llu -- halting netplay\n", (unsigned long long)netplay_session.frame());
+                fflush(stdout);
+                break;
+            }
+            if (st == rp::net::NetStatus::Disconnected) {
+                printf("peer disconnected -- halting netplay\n");
+                fflush(stdout);
+                break;
             }
         } else {
-            rp_runtime_present(g_rt, nullptr);   // normal forward present to the window
+            const bool rewinding = g_rewind_enabled && (GetAsyncKeyState(kRewindVK) & 0x8000) != 0;
+            if (rewinding) {
+                // Step one frame into the past and show it. RP_ERR_NOT_FOUND means the ring is
+                // empty (no more history) -- stop going back and hold on the current frame
+                // (skip the present this tick) rather than lurching forward again while the key
+                // is still held.
+                if (rp_runtime_rewind(g_rt) == RP_OK) {
+                    rp_runtime_present(g_rt, nullptr);
+                }
+            } else {
+                rp_runtime_present(g_rt, nullptr);   // normal forward present to the window
+            }
         }
     }
     rp_runtime_unload_core(g_rt);
