@@ -44,7 +44,10 @@ struct Shim {
     rp_input_state input{};         // last input snapshot from RetroPark
 };
 
-Shim* g = nullptr;   // single active shim instance (libretro callbacks are global C fns)
+// libretro's callbacks (env_cb, video_cb, input_poll_cb, ...) are global C functions with
+// no per-instance context param, so the shim supports exactly one active instance at a
+// time; a second concurrent sh_create() would reroute the first core's frames/input here.
+Shim* g = nullptr;
 
 // No-op logger handed to the core via GET_LOG_INTERFACE. Variadic, cdecl to match
 // retro_log_printf_t. Discards everything; the shim is headless.
@@ -160,12 +163,24 @@ std::wstring shim_dir() {
     return s.substr(0, s.find_last_of(L"\\/"));
 }
 
-std::string to_utf8(const std::wstring& w) {
+std::string to_ansi(const std::wstring& w) {
     if (w.empty()) return {};
-    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    int n = WideCharToMultiByte(CP_ACP, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
     std::string out((size_t)n, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), out.data(), n, nullptr, nullptr);
+    WideCharToMultiByte(CP_ACP, 0, w.c_str(), (int)w.size(), out.data(), n, nullptr, nullptr);
     return out;
+}
+
+// libretro cores fopen() the system/save/assets directory as an ANSI (CP_ACP) path, not
+// UTF-8, so a non-ASCII install directory would otherwise break save/system file access.
+// Prefer the 8.3 short path (always ASCII-representable) converted to ANSI; fall back to
+// converting the long path directly to ANSI if short names are unavailable (e.g. disabled
+// on the volume) or on the rare case that fails too.
+std::string ansi_safe_dir(const std::wstring& dir) {
+    wchar_t shortp[MAX_PATH]{};
+    DWORD n = GetShortPathNameW(dir.c_str(), shortp, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) return to_ansi(std::wstring(shortp, n));
+    return to_ansi(dir);
 }
 
 // Minimal, dependency-free parse of the "libretro_core" value from the sibling
@@ -209,7 +224,10 @@ rp_core* sh_create(const rp_host_iface* host) {
 
     const std::wstring dir = shim_dir();
     const std::wstring core_dll = dir + L"\\" + core_dll_name(dir);
-    s->lib = LoadLibraryW(core_dll.c_str());
+    // Search DLLs the core's own dir + safe system dirs (defense-in-depth against
+    // DLL planting); core_dll itself is already an absolute self-located path.
+    s->lib = LoadLibraryExW(core_dll.c_str(), nullptr,
+                             LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
     if (!s->lib) { delete s; g = nullptr; return nullptr; }
 
     load_fn(s, s->retro_api_version, "retro_api_version");
@@ -236,7 +254,7 @@ rp_core* sh_create(const rp_host_iface* host) {
         return nullptr;
     }
 
-    s->sys_dir = to_utf8(dir);   // real writable path for system/save/assets
+    s->sys_dir = ansi_safe_dir(dir);   // ANSI-safe path for system/save/assets (see ansi_safe_dir)
     s->retro_set_environment(env_cb);
     s->retro_set_video_refresh(video_cb);
     s->retro_set_input_poll(input_poll_cb);
