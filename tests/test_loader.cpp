@@ -18,7 +18,7 @@ void fake_get_info(rp_core_info* out){
 }
 rp_core* fake_create(const rp_host_iface*){ g_fake.created=true; return reinterpret_cast<rp_core*>(&g_fake); }
 void      fake_destroy(rp_core*){ g_fake.created=false; }
-rp_result fake_set_surfaces(rp_core*, const rp_surface_desc*, uint32_t n){ g_fake.surfaces=n; return RP_OK; }
+rp_result fake_set_surfaces(rp_core*, const rp_surface_set* set){ g_fake.surfaces=set->count; return RP_OK; }
 rp_result fake_start(rp_core*){ g_fake.started=true; return RP_OK; }
 rp_result fake_stop(rp_core*){ g_fake.started=false; return RP_OK; }
 
@@ -57,7 +57,9 @@ TEST_CASE("loader: happy path advances states") {
     CHECK(g_fake.created);
 
     rp_surface_desc descs[2] = {};
-    CHECK(ld.set_surfaces(descs, 2, err) == RP_OK);
+    rp_surface_set set{};
+    set.count = 2; set.surfaces = descs;
+    CHECK(ld.set_surfaces(&set, err) == RP_OK);
     CHECK(g_fake.surfaces == 2u);
 
     CHECK(ld.start(err) == RP_OK);

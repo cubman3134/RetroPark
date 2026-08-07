@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#define RETROPARK_ABI_VERSION 1u
+#define RETROPARK_ABI_VERSION 2u
 #define RP_CORE_ABI_EXPORT_NAME "rp_get_core_abi"
 
 typedef enum rp_result {
@@ -47,6 +47,14 @@ typedef struct rp_surface_desc {
     uint64_t generation;        /* ring generation; echoed back on submit_frame */
 } rp_surface_desc;
 
+typedef struct rp_surface_set {
+    uint32_t               count;
+    uint32_t               reserved;
+    const rp_surface_desc* surfaces;
+    void*                  sync_handle;      /* shared timeline semaphore NT handle (Vulkan); NULL for D3D11 */
+    uint8_t                device_uuid[16];  /* target VkPhysicalDevice UUID (Vulkan); all-zero for D3D11 */
+} rp_surface_set;
+
 typedef struct rp_input_state {
     uint8_t  keys[256];         /* virtual-key down flags */
     int16_t  pad_axes[8];
@@ -56,7 +64,7 @@ typedef struct rp_input_state {
 typedef struct rp_host_iface {
     rp_host* host;
     void (*log)(rp_host* host, int level, const char* msg);
-    void (*submit_frame)(rp_host* host, uint32_t index, uint64_t generation);
+    void (*submit_frame)(rp_host* host, uint32_t index, uint64_t generation, uint64_t sync_value);
     void (*input_state)(rp_host* host, rp_input_state* out);
 } rp_host_iface;
 
@@ -72,7 +80,7 @@ typedef struct rp_core_abi {
     void      (*get_info)(rp_core_info* out);
     rp_core*  (*create)(const rp_host_iface* host);
     void      (*destroy)(rp_core* core);
-    rp_result (*set_surfaces)(rp_core* core, const rp_surface_desc* descs, uint32_t count);
+    rp_result (*set_surfaces)(rp_core* core, const rp_surface_set* set);
     rp_result (*start)(rp_core* core);
     rp_result (*stop)(rp_core* core);
 } rp_core_abi;

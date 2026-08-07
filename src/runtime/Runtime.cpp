@@ -1,4 +1,5 @@
 #include "runtime/Runtime.h"
+#include "runtime/BackendFactory.h"
 #include "loader/Manifest.h"
 #include <fstream>
 #include <sstream>
@@ -7,15 +8,19 @@
 namespace rp {
 
 static void host_log(rp_host*, int, const char*) {}
-static void host_submit(rp_host* h, uint32_t i, uint64_t g) {
-    reinterpret_cast<Runtime*>(h)->on_submit(i, g);
+static void host_submit(rp_host* h, uint32_t i, uint64_t g, uint64_t sv) {
+    reinterpret_cast<Runtime*>(h)->on_submit(i, g, sv);
 }
 static void host_input(rp_host* h, rp_input_state* out) {
     reinterpret_cast<Runtime*>(h)->on_input(out);
 }
 
-Runtime::Runtime(rp_graphics_api, void* native_window) : native_window_(native_window) {
-    backend_ = std::make_unique<D3D11Backend>();
+Runtime::Runtime(rp_graphics_api api, void* native_window) : native_window_(native_window), api_(api) {
+    backend_ = make_backend(api_);
+    if (!backend_) {
+        init_ok_ = false;
+        return;
+    }
     std::string err;
     init_ok_ = (backend_->initialize(native_window_, width_, height_, err) == RP_OK);
     host_iface_.host = reinterpret_cast<rp_host*>(this);
@@ -26,8 +31,8 @@ Runtime::Runtime(rp_graphics_api, void* native_window) : native_window_(native_w
 
 Runtime::~Runtime() { unload_core(); }
 
-void Runtime::on_submit(uint32_t index, uint64_t generation) {
-    ring_.accept_submit(index, generation);
+void Runtime::on_submit(uint32_t index, uint64_t generation, uint64_t sync_value) {
+    ring_.accept_submit(index, generation, sync_value);
 }
 void Runtime::on_input(rp_input_state* out) {
     std::lock_guard<std::mutex> lk(input_mtx_);
@@ -48,12 +53,19 @@ rp_result Runtime::rebuild_surfaces(std::string& err) {
     if (r != RP_OK) return r;
     uint64_t gen = ring_.reallocate(width_, height_);
     for (auto& d : descs) d.generation = gen;
-    if (loader_.state() == LoaderState::Created)
-        return loader_.set_surfaces(descs.data(), (uint32_t)descs.size(), err);
+    if (loader_.state() == LoaderState::Created) {
+        rp_surface_set set{};
+        set.count = (uint32_t)descs.size();
+        set.surfaces = descs.data();
+        set.sync_handle = backend_->present_sync_handle();
+        backend_->present_device_uuid(set.device_uuid);
+        return loader_.set_surfaces(&set, err);
+    }
     return RP_OK;
 }
 
 rp_result Runtime::resize(uint32_t w, uint32_t h) {
+    if (!backend_) return RP_ERR_DEVICE;
     width_ = w; height_ = h;
     std::string err;
     if (!core_loaded_) {
@@ -79,7 +91,7 @@ rp_result Runtime::load_core(const std::string& core_dir) {
     CoreManifest m; std::string err;
     if (parse_manifest(ss.str(), m, err) != RP_OK) return RP_ERR_BAD_ARG;
     if (m.type != RP_CORE_PRESENTING) return RP_ERR_UNSUPPORTED; // driven not in Slice A
-    if (m.graphics_api != RP_GFX_D3D11) return RP_ERR_UNSUPPORTED; // only d3d11 in Slice A
+    if (m.graphics_api != api_) return RP_ERR_UNSUPPORTED; // core must match runtime's backend api
 
     std::string dll = core_dir + "/" + m.entry;
     if (Win32CoreModule::open(dll, module_, err) != RP_OK) return RP_ERR_NOT_FOUND;
@@ -116,10 +128,11 @@ rp_result Runtime::unload_core() {
 }
 
 rp_result Runtime::present(uint8_t* out_rgba) {
-    uint32_t idx = 0;
-    bool has = ring_.latest_ready(idx);
+    if (!backend_) return RP_ERR_DEVICE;
+    uint32_t idx = 0; uint64_t sv = 0;
+    bool has = ring_.latest_ready(idx, sv);
     std::string err;
-    return backend_->composite_and_present(idx, has, out_rgba, err);
+    return backend_->composite_and_present(idx, sv, has, out_rgba, err);
 }
 
 } // namespace rp

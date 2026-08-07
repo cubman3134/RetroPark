@@ -13,7 +13,7 @@ public:
     rp_result initialize(void* native_window, uint32_t w, uint32_t h, std::string& err) override;
     rp_result allocate_surfaces(uint32_t count, uint32_t w, uint32_t h,
                                 std::vector<rp_surface_desc>& out, std::string& err) override;
-    rp_result composite_and_present(uint32_t ready_index, bool has_frame,
+    rp_result composite_and_present(uint32_t ready_index, uint64_t sync_value, bool has_frame,
                                     uint8_t* out_rgba, std::string& err) override;
 
     // Test helpers.

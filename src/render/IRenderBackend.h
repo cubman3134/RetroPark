@@ -11,7 +11,11 @@ struct IRenderBackend {
     virtual rp_result allocate_surfaces(uint32_t count, uint32_t w, uint32_t h,
                                         std::vector<rp_surface_desc>& out, std::string& err) = 0;
     // If out_rgba != null, the composited image (w*h*4, RGBA8) is copied there (headless).
-    virtual rp_result composite_and_present(uint32_t ready_index, bool has_frame,
+    virtual rp_result composite_and_present(uint32_t ready_index, uint64_t sync_value, bool has_frame,
                                             uint8_t* out_rgba, std::string& err) = 0;
+
+    // External-sync accessors (Vulkan; default no-op for backends without external sync).
+    virtual void* present_sync_handle() const { return nullptr; }
+    virtual void  present_device_uuid(uint8_t out[16]) const { for (int i=0;i<16;++i) out[i]=0; }
 };
 }

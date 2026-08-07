@@ -32,3 +32,11 @@ TEST_CASE("runtime: resize when no core is loaded still works") {
     CHECK(rp_runtime_resize(rt, 96, 96) == RP_OK);
     rp_runtime_destroy(rt);
 }
+
+TEST_CASE("runtime: unsupported api yields a usable-but-erroring runtime, no crash") {
+    rp_runtime* rt = rp_runtime_create((rp_graphics_api)99, nullptr);
+    REQUIRE(rt != nullptr);
+    CHECK(rp_runtime_resize(rt, 64, 64) == RP_ERR_DEVICE);
+    CHECK(rp_runtime_present(rt, nullptr) == RP_ERR_DEVICE);
+    rp_runtime_destroy(rt);
+}

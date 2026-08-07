@@ -25,10 +25,10 @@ rp_result CoreLoader::create(const rp_host_iface* host, std::string& error) {
     return RP_OK;
 }
 
-rp_result CoreLoader::set_surfaces(const rp_surface_desc* descs, uint32_t count, std::string& error) {
+rp_result CoreLoader::set_surfaces(const rp_surface_set* set, std::string& error) {
     if (state_ != LoaderState::Created) { error = "set_surfaces requires Created"; return RP_ERR_INTERNAL; }
     if (!abi_->set_surfaces) { error = "core missing set_surfaces"; return RP_ERR_UNSUPPORTED; }
-    return abi_->set_surfaces(core_, descs, count);
+    return abi_->set_surfaces(core_, set);
 }
 
 rp_result CoreLoader::start(std::string& error) {

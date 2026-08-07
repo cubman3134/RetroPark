@@ -8,8 +8,8 @@ public:
     explicit SurfaceRing(uint32_t slot_count);
     uint64_t reallocate(uint32_t width, uint32_t height);
     uint32_t next_producer_slot();
-    bool     accept_submit(uint32_t index, uint64_t generation);
-    bool     latest_ready(uint32_t& index_out) const;
+    bool     accept_submit(uint32_t index, uint64_t generation, uint64_t sync_value);
+    bool     latest_ready(uint32_t& index_out, uint64_t& sync_value_out) const;
 
     uint64_t generation() const { return generation_; }
     uint32_t slot_count() const { return slot_count_; }
@@ -26,5 +26,6 @@ private:
     std::atomic<bool>     has_ready_{false};
     std::atomic<uint32_t> ready_index_{0};
     std::atomic<uint64_t> ready_generation_{0};
+    std::atomic<uint64_t> ready_sync_{0};
 };
 }

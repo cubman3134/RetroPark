@@ -10,20 +10,36 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProc(h, m, w, l);
 }
 
+// Core dirs are baked in at build time; fall back to relative paths.
+#ifndef RP_HARNESS_CORE_DIR
+#define RP_HARNESS_CORE_DIR "cores/refcore_present"
+#endif
+#ifndef RP_HARNESS_CORE_DIR_VK
+#define RP_HARNESS_CORE_DIR_VK "cores/refcore_present_vk"
+#endif
+
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
+    // Parse `--api vulkan|d3d11` (default d3d11) from the process command line.
+    bool use_vulkan = false;
+    {
+        std::wstring cmd = GetCommandLineW() ? GetCommandLineW() : L"";
+        if (cmd.find(L"--api vulkan") != std::wstring::npos ||
+            cmd.find(L"--api=vulkan") != std::wstring::npos) {
+            use_vulkan = true;
+        }
+    }
+    const rp_graphics_api api = use_vulkan ? RP_GFX_VULKAN : RP_GFX_D3D11;
+    const char* core_dir = use_vulkan ? RP_HARNESS_CORE_DIR_VK : RP_HARNESS_CORE_DIR;
+
     WNDCLASSW wc{}; wc.lpfnWndProc = WndProc; wc.hInstance = hInst; wc.lpszClassName = L"RetroParkHarness";
     RegisterClassW(&wc);
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"RetroPark Slice A",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, 640, 480,
         nullptr, nullptr, hInst, nullptr);
 
-    g_rt = rp_runtime_create(RP_GFX_D3D11, hwnd);
+    g_rt = rp_runtime_create(api, hwnd);
     rp_runtime_resize(g_rt, 640, 480);
-    // Core dir is passed at build time; fall back to a relative path.
-#ifndef RP_HARNESS_CORE_DIR
-#define RP_HARNESS_CORE_DIR "cores/refcore_present"
-#endif
-    rp_runtime_load_core(g_rt, RP_HARNESS_CORE_DIR);
+    rp_runtime_load_core(g_rt, core_dir);
 
     MSG msg{};
     bool running = true;

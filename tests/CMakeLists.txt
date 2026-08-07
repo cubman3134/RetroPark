@@ -10,9 +10,21 @@ add_executable(retropark_tests
   test_d3d11_handoff.cpp
   test_compositor.cpp
   test_runtime_api.cpp
-  test_e2e.cpp)
+  test_backend_factory.cpp
+  test_e2e.cpp
+  test_shader_embed.cpp
+  test_vulkan_device.cpp
+  test_vulkan_handoff.cpp
+  test_vulkan_compositor.cpp
+  test_vulkan_e2e.cpp)
 target_link_libraries(retropark_tests PRIVATE retropark doctest::doctest nlohmann_json::nlohmann_json)
 target_include_directories(retropark_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+set(PROBE_HDR "${CMAKE_CURRENT_BINARY_DIR}/gen/probe_vert_generated.h")
+retropark_embed_shader("${CMAKE_CURRENT_SOURCE_DIR}/shaders/probe.vert" vert "${PROBE_HDR}" probe_vert)
+add_custom_target(gen_probe_shader DEPENDS "${PROBE_HDR}")
+add_dependencies(retropark_tests gen_probe_shader)
+target_include_directories(retropark_tests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/gen")
 add_test(NAME retropark_tests COMMAND retropark_tests)
 set_tests_properties(retropark_tests PROPERTIES WORKING_DIRECTORY $<TARGET_FILE_DIR:retropark_tests>)
 
@@ -26,3 +38,10 @@ add_subdirectory(mock_core)
 add_dependencies(retropark_tests refcore_present)
 target_compile_definitions(retropark_tests PRIVATE
   RP_CORE_DIR="$<TARGET_FILE_DIR:refcore_present>/cores/refcore_present")
+
+# vk e2e test loads the real reference Vulkan presenting core built by
+# cores/refcore_present_vk; depend on it and tell the test where its DLL +
+# core.json land (absolute path via generator expression).
+add_dependencies(retropark_tests refcore_present_vk)
+target_compile_definitions(retropark_tests PRIVATE
+  RP_VK_CORE_DIR="$<TARGET_FILE_DIR:refcore_present_vk>/cores/refcore_present_vk")

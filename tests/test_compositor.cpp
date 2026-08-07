@@ -30,7 +30,7 @@ TEST_CASE("compositor: core frame shows and overlay blends over it") {
     REQUIRE(SUCCEEDED(pkm->ReleaseSync(1)));
 
     std::vector<uint8_t> img(W*H*4, 0);
-    REQUIRE(host.composite_and_present(/*ready_index=*/0, /*has_frame=*/true, img.data(), err) == RP_OK);
+    REQUIRE(host.composite_and_present(/*ready_index=*/0, /*sync_value=*/0, /*has_frame=*/true, img.data(), err) == RP_OK);
 
     auto at = [&](uint32_t x, uint32_t y, int c){ return img[(y*W + x)*4 + c]; };
     // Bottom-right quadrant: no overlay -> pure green.

@@ -19,19 +19,21 @@ uint32_t SurfaceRing::next_producer_slot() {
     return s;
 }
 
-bool SurfaceRing::accept_submit(uint32_t index, uint64_t generation) {
+bool SurfaceRing::accept_submit(uint32_t index, uint64_t generation, uint64_t sync_value) {
     if (generation != generation_) return false;
     if (index >= slot_count_) return false;
     ready_index_.store(index, std::memory_order_relaxed);
     ready_generation_.store(generation, std::memory_order_relaxed);
+    ready_sync_.store(sync_value, std::memory_order_relaxed);
     has_ready_.store(true, std::memory_order_release);
     return true;
 }
 
-bool SurfaceRing::latest_ready(uint32_t& index_out) const {
+bool SurfaceRing::latest_ready(uint32_t& index_out, uint64_t& sync_value_out) const {
     if (!has_ready_.load(std::memory_order_acquire)) return false;
     if (ready_generation_.load(std::memory_order_relaxed) != generation_) return false;
     index_out = ready_index_.load(std::memory_order_relaxed);
+    sync_value_out = ready_sync_.load(std::memory_order_relaxed);
     return true;
 }
 }
