@@ -71,5 +71,11 @@ protected:
     Microsoft::WRL::ComPtr<ID3D11Texture2D> offscreen_;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> offscreen_rtv_;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> backbuffer_rtv_;   // set when swapchain_ is non-null
+
+    // Driven-model CPU upload target for composite_driven(); recreated when the
+    // requested width/height changes. driven_srv_ is reused across dupe==true calls.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> driven_tex_;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> driven_srv_;
+    uint32_t driven_w_ = 0, driven_h_ = 0;
 };
 }
