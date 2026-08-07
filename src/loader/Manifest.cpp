@@ -30,6 +30,7 @@ rp_result parse_manifest(const std::string& text, CoreManifest& out, std::string
 
     if (gfx_s == "d3d11") out.graphics_api = RP_GFX_D3D11;
     else if (gfx_s == "vulkan") out.graphics_api = RP_GFX_VULKAN;
+    else if (gfx_s == "none") out.graphics_api = RP_GFX_NONE;
     else { error = "unknown graphics_api: " + gfx_s; return RP_ERR_BAD_ARG; }
 
     return RP_OK;

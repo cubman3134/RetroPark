@@ -24,10 +24,12 @@ rp_result fake_stop(rp_core*){ g_fake.started=false; return RP_OK; }
 
 const rp_core_abi kGoodAbi = {
     RETROPARK_ABI_VERSION, fake_get_info, fake_create, fake_destroy,
-    fake_set_surfaces, fake_start, fake_stop
+    fake_set_surfaces, fake_start, fake_stop,
+    nullptr, nullptr, nullptr, nullptr, nullptr
 };
 const rp_core_abi kBadVersionAbi = {
-    999u, fake_get_info, fake_create, fake_destroy, fake_set_surfaces, fake_start, fake_stop
+    999u, fake_get_info, fake_create, fake_destroy, fake_set_surfaces, fake_start, fake_stop,
+    nullptr, nullptr, nullptr, nullptr, nullptr
 };
 const rp_core_abi* good_entry(){ return &kGoodAbi; }
 const rp_core_abi* bad_entry(){ return &kBadVersionAbi; }

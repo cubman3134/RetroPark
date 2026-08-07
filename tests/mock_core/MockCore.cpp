@@ -25,7 +25,8 @@ rp_result mock_stop(rp_core* c) { reinterpret_cast<MockCore*>(c)->started = 0; r
 
 const rp_core_abi kAbi = {
     RETROPARK_ABI_VERSION, mock_get_info, mock_create, mock_destroy,
-    mock_set_surfaces, mock_start, mock_stop
+    mock_set_surfaces, mock_start, mock_stop,
+    nullptr, nullptr, nullptr, nullptr, nullptr
 };
 }
 

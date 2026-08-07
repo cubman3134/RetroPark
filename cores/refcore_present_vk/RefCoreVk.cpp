@@ -415,7 +415,8 @@ rp_result ref_stop(rp_core* core) {
 
 const rp_core_abi kAbi = {
     RETROPARK_ABI_VERSION, ref_get_info, ref_create, ref_destroy,
-    ref_set_surfaces, ref_start, ref_stop
+    ref_set_surfaces, ref_start, ref_stop,
+    nullptr, nullptr, nullptr, nullptr, nullptr
 };
 
 }  // namespace
