@@ -2,12 +2,52 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <retropark/retropark.h>
+#include <cstdio>
+#include <cstdint>
 #include <string>
+#include <vector>
 
 static rp_runtime* g_rt = nullptr;
 
+// F5/F7 savestate + a held-key rewind, for the human demo (Slice F Task 5). These are
+// no-ops (the runtime C API just returns RP_ERR_UNSUPPORTED / does nothing useful) for a
+// presenting core with no serialize support, so wiring them unconditionally is harmless;
+// they only do something visible with --driven or --content.
+static std::vector<uint8_t> g_save_buf;
+static bool g_has_saved = false;
+static bool g_rewind_enabled = false;
+// Rewind key: hold LEFT ARROW to step backward one frame per tick; release to resume forward.
+static const int kRewindVK = VK_LEFT;
+
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
+    if (m == WM_KEYDOWN && g_rt && ((static_cast<uint32_t>(l) >> 30) & 1u) == 0u) {   // ignore auto-repeat
+        if (w == VK_F5) {
+            size_t sz = rp_runtime_serialize_size(g_rt);
+            if (sz == 0) {
+                printf("[harness] save: unsupported (no serialize-capable core loaded)\n");
+            } else {
+                g_save_buf.assign(sz, 0);
+                rp_result r = rp_runtime_save_state(g_rt, g_save_buf.data(), g_save_buf.size());
+                if (r == RP_OK) {
+                    g_has_saved = true;
+                    printf("[harness] saved state, %zu bytes\n", sz);
+                } else {
+                    g_has_saved = false;
+                    printf("[harness] save failed (result=%d)\n", (int)r);
+                }
+            }
+            fflush(stdout);
+        } else if (w == VK_F7) {
+            if (!g_has_saved) {
+                printf("[harness] load: no saved state\n");
+            } else {
+                rp_result r = rp_runtime_load_state(g_rt, g_save_buf.data(), g_save_buf.size());
+                printf("[harness] load state: %s\n", r == RP_OK ? "ok" : "failed");
+            }
+            fflush(stdout);
+        }
+    }
     return DefWindowProc(h, m, w, l);
 }
 
@@ -33,7 +73,17 @@ static std::string narrow(const std::wstring& w) {
     return s;
 }
 
+// A WS_OVERLAPPEDWINDOW/WinMain app has no console by default, so printf from the F5/F7/
+// rewind handlers above would otherwise vanish silently. Attach the launching console when
+// there is one (running from a shell), else allocate a fresh one, and route stdout to it.
+static void attach_console_output() {
+    if (!AttachConsole(ATTACH_PARENT_PROCESS) && !AllocConsole()) return;
+    FILE* f = nullptr;
+    freopen_s(&f, "CONOUT$", "w", stdout);
+}
+
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
+    attach_console_output();
     // Parse `--api vulkan|d3d11` (default d3d11), `--driven`, and `--content <rom>`
     // (the next arg is the ROM path) from the process command line.
     bool use_vulkan = false;
@@ -82,6 +132,16 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         rp_runtime_load_core(g_rt, core_dir);
     }
 
+    // Rewind only makes sense against a serialize-capable driven/content core; on a plain
+    // presenting core this returns RP_ERR_UNSUPPORTED and g_rewind_enabled just stays false,
+    // making the held rewind key a harmless no-op below.
+    if (use_content || use_driven) {
+        g_rewind_enabled = (rp_runtime_set_rewind(g_rt, 1, 600) == RP_OK);
+        if (!g_rewind_enabled) printf("[harness] rewind unsupported for this core\n");
+    }
+    printf("[harness] keys: F5 = save state, F7 = load state, hold LEFT ARROW = rewind\n");
+    fflush(stdout);
+
     MSG msg{};
     bool running = true;
     while (running) {
@@ -89,7 +149,18 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
             if (msg.message == WM_QUIT) { running = false; break; }
             TranslateMessage(&msg); DispatchMessage(&msg);
         }
-        rp_runtime_present(g_rt, nullptr);   // present to the window
+        const bool rewinding = g_rewind_enabled && (GetAsyncKeyState(kRewindVK) & 0x8000) != 0;
+        if (rewinding) {
+            // Step one frame into the past and show it. RP_ERR_NOT_FOUND means the ring is
+            // empty (no more history) -- stop going back and hold on the current frame
+            // (skip the present this tick) rather than lurching forward again while the key
+            // is still held.
+            if (rp_runtime_rewind(g_rt) == RP_OK) {
+                rp_runtime_present(g_rt, nullptr);
+            }
+        } else {
+            rp_runtime_present(g_rt, nullptr);   // normal forward present to the window
+        }
     }
     rp_runtime_unload_core(g_rt);
     rp_runtime_destroy(g_rt);

@@ -1,4 +1,5 @@
 #include "runtime/Runtime.h"
+#include "runtime/RewindRing.h"
 #include "runtime/BackendFactory.h"
 #include "loader/Manifest.h"
 #include "render/FramebufferCopy.h"
@@ -187,6 +188,8 @@ rp_result Runtime::unload_core() {
     requires_content_ = false; content_loaded_ = false;
     if (audio_) { audio_->close(); audio_.reset(); }
     audio_frames_ = 0; audio_nonsilent_ = false;
+    rewind_ring_.clear();
+    rewind_enabled_ = false; rewind_replay_ = false; rewind_max_ = 0;
     return RP_OK;
 }
 
@@ -211,6 +214,22 @@ rp_result Runtime::present(uint8_t* out_rgba) {
     std::string err;
     if (core_loaded_ && core_type_ == RP_CORE_DRIVEN) {
         if (requires_content_ && !content_loaded_) return RP_ERR_INTERNAL;
+        // Rewind ring capture (forward frames only). A present that re-renders a rewound-to
+        // frame (rewind_replay_) must NOT capture — that would re-grow the ring with the very
+        // frames we are stepping back through. Clearing the flag here means the NEXT forward
+        // present resumes capturing cleanly from the restored point (spec §2, e2e step 5).
+        if (rewind_replay_) {
+            rewind_replay_ = false;
+        } else if (rewind_enabled_) {
+            size_t sz = loader_.serialize_size();
+            if (sz > 0) {
+                std::vector<uint8_t> snap(sz);
+                std::string serr;
+                // A serialize failure mid-capture just skips this snapshot — never crash.
+                if (loader_.serialize(snap.data(), sz, serr) == RP_OK)
+                    rewind_ring_push(rewind_ring_, std::move(snap), rewind_max_);
+            }
+        }
         dr_have_ = false;
         rp_result r = loader_.run_frame(err);
         if (r != RP_OK) return r;
@@ -226,6 +245,52 @@ rp_result Runtime::present(uint8_t* out_rgba) {
     uint32_t idx = 0; uint64_t sv = 0;
     bool has = ring_.latest_ready(idx, sv);
     return backend_->composite_and_present(idx, sv, has, out_rgba, err);
+}
+
+size_t Runtime::serialize_size() {
+    return loader_.serialize_size();
+}
+
+rp_result Runtime::save_state(void* buf, size_t size) {
+    if (!buf) return RP_ERR_BAD_ARG;
+    size_t sz = loader_.serialize_size();
+    if (sz == 0) return RP_ERR_UNSUPPORTED;
+    if (size < sz) return RP_ERR_BAD_ARG;
+    std::string err;
+    return loader_.serialize(buf, sz, err);
+}
+
+rp_result Runtime::load_state(const void* buf, size_t size) {
+    if (!buf) return RP_ERR_BAD_ARG;
+    if (size == 0) return RP_ERR_BAD_ARG;
+    std::string err;
+    return loader_.unserialize(buf, size, err);
+}
+
+rp_result Runtime::set_rewind(int enabled, uint32_t max_snapshots) {
+    // Rewind only makes sense for a serialize-capable (driven) core — the host owning the
+    // state is the driven model's whole premise. A no-serialize / presenting / no core -> 0.
+    if (loader_.serialize_size() == 0) return RP_ERR_UNSUPPORTED;
+    rewind_enabled_ = (enabled != 0);
+    rewind_max_ = max_snapshots ? max_snapshots : 600;   // sane default (~10s at 60fps)
+    rewind_ring_.clear();
+    rewind_replay_ = false;
+    return RP_OK;
+}
+
+rp_result Runtime::rewind() {
+    if (!rewind_enabled_) return RP_ERR_INTERNAL;
+    // Need at least two snapshots: the newest is the pre-state of the just-displayed frame; we
+    // discard it and step back to the previous frame's pre-state. Fewer than two = no history.
+    if (rewind_ring_.size() < 2) return RP_ERR_NOT_FOUND;
+    rewind_ring_.pop_back();                     // drop the just-displayed frame's pre-state
+    const std::vector<uint8_t>& snap = rewind_ring_.back();
+    std::string err;
+    rp_result r = loader_.unserialize(snap.data(), snap.size(), err);
+    // The next present() re-renders this restored frame; flag it so that present does NOT
+    // capture (which would re-grow the ring by replaying frames we are stepping back through).
+    rewind_replay_ = true;
+    return r;
 }
 
 } // namespace rp
@@ -260,5 +325,25 @@ void rp_runtime_audio_stats(rp_runtime* rt, uint64_t* frames_out, int* nonsilent
     auto* r = reinterpret_cast<Runtime*>(rt);
     if (frames_out) *frames_out = r->audio_frames();
     if (nonsilent_out) *nonsilent_out = r->audio_nonsilent() ? 1 : 0;
+}
+size_t rp_runtime_serialize_size(rp_runtime* rt) {
+    if (!rt) return 0;
+    return reinterpret_cast<Runtime*>(rt)->serialize_size();
+}
+rp_result rp_runtime_save_state(rp_runtime* rt, void* buf, size_t size) {
+    if (!rt || !buf) return RP_ERR_BAD_ARG;
+    return reinterpret_cast<Runtime*>(rt)->save_state(buf, size);
+}
+rp_result rp_runtime_load_state(rp_runtime* rt, const void* buf, size_t size) {
+    if (!rt || !buf) return RP_ERR_BAD_ARG;
+    return reinterpret_cast<Runtime*>(rt)->load_state(buf, size);
+}
+rp_result rp_runtime_set_rewind(rp_runtime* rt, int enabled, uint32_t max_snapshots) {
+    if (!rt) return RP_ERR_BAD_ARG;
+    return reinterpret_cast<Runtime*>(rt)->set_rewind(enabled, max_snapshots);
+}
+rp_result rp_runtime_rewind(rp_runtime* rt) {
+    if (!rt) return RP_ERR_BAD_ARG;
+    return reinterpret_cast<Runtime*>(rt)->rewind();
 }
 }

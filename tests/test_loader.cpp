@@ -7,7 +7,7 @@ using namespace rp;
 
 // ---- A fake core implemented inline, exposed through a fake module ----
 namespace {
-struct FakeCoreState { bool created=false, started=false; uint32_t surfaces=0; };
+struct FakeCoreState { bool created=false, started=false; uint32_t surfaces=0; uint32_t save_val=0; };
 FakeCoreState g_fake;
 
 void fake_get_info(rp_core_info* out){
@@ -21,11 +21,14 @@ void      fake_destroy(rp_core*){ g_fake.created=false; }
 rp_result fake_set_surfaces(rp_core*, const rp_surface_set* set){ g_fake.surfaces=set->count; return RP_OK; }
 rp_result fake_start(rp_core*){ g_fake.started=true; return RP_OK; }
 rp_result fake_stop(rp_core*){ g_fake.started=false; return RP_OK; }
+size_t    fake_serialize_size(rp_core*){ return sizeof(uint32_t); }
+rp_result fake_serialize(rp_core*, void* d, size_t n){ if (n<4) return RP_ERR_BAD_ARG; uint32_t v=0xABCD1234; memcpy(d,&v,4); return RP_OK; }
+rp_result fake_unserialize(rp_core* c, const void* d, size_t n){ if (n<4) return RP_ERR_BAD_ARG; memcpy(&reinterpret_cast<FakeCoreState*>(c)->save_val, d, 4); return RP_OK; }
 
 const rp_core_abi kGoodAbi = {
     RETROPARK_ABI_VERSION, fake_get_info, fake_create, fake_destroy,
     fake_set_surfaces, fake_start, fake_stop,
-    nullptr, nullptr, nullptr, nullptr, nullptr, nullptr
+    nullptr, nullptr, fake_serialize_size, fake_serialize, fake_unserialize, nullptr
 };
 const rp_core_abi kBadVersionAbi = {
     999u, fake_get_info, fake_create, fake_destroy, fake_set_surfaces, fake_start, fake_stop,
@@ -100,4 +103,17 @@ TEST_CASE("loader: start before create is rejected") {
     FakeModule mod(good_entry);
     CHECK(ld.load(&mod, err) == RP_OK);
     CHECK(ld.start(err) == RP_ERR_INTERNAL);
+}
+
+TEST_CASE("loader: serialize passthroughs round-trip") {
+    g_fake = {};
+    CoreLoader ld; std::string err; FakeModule mod(good_entry);
+    REQUIRE(ld.load(&mod, err) == RP_OK);
+    rp_host_iface host{}; REQUIRE(ld.create(&host, err) == RP_OK);
+    CHECK(ld.serialize_size() == 4u);
+    uint8_t buf[4] = {0};
+    CHECK(ld.serialize(buf, 4, err) == RP_OK);
+    CHECK(ld.unserialize(buf, 4, err) == RP_OK);
+    CHECK(g_fake.save_val == 0xABCD1234u);   // round-tripped through the fake
+    ld.destroy();
 }

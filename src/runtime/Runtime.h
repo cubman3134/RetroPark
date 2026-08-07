@@ -2,6 +2,9 @@
 #include <memory>
 #include <string>
 #include <mutex>
+#include <deque>
+#include <vector>
+#include <cstdint>
 #include <retropark/retropark.h>
 #include "loader/CoreLoader.h"
 #include "loader/Win32CoreModule.h"
@@ -20,6 +23,11 @@ public:
     rp_result resize(uint32_t w, uint32_t h);
     void set_input(const rp_input_state& in);
     rp_result present(uint8_t* out_rgba);
+    size_t serialize_size();
+    rp_result save_state(void* buf, size_t size);
+    rp_result load_state(const void* buf, size_t size);
+    rp_result set_rewind(int enabled, uint32_t max_snapshots);
+    rp_result rewind();
 
     // Host-iface trampolines.
     void on_submit(uint32_t index, uint64_t generation, uint64_t sync_value);
@@ -56,5 +64,13 @@ private:
     std::unique_ptr<IAudioOutput> audio_;
     uint64_t audio_frames_ = 0;
     bool audio_nonsilent_ = false;
+
+    // Rewind ring: bounded uncompressed per-frame snapshots of the driven core's pre-frame
+    // state, captured at the top of each forward present(). See RewindRing.h / spec §2.
+    std::deque<std::vector<uint8_t>> rewind_ring_;
+    bool     rewind_enabled_ = false;
+    bool     rewind_replay_  = false;   // set by rewind(); the next present() re-renders a
+                                        // restored frame and must NOT capture it
+    uint32_t rewind_max_     = 0;
 };
 }

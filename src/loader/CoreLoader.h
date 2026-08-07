@@ -17,6 +17,9 @@ public:
     void destroy();
     rp_result run_frame(std::string& error);
     rp_result get_av_info(rp_av_info* out, std::string& error);
+    size_t serialize_size();
+    rp_result serialize(void* data, size_t size, std::string& error);
+    rp_result unserialize(const void* data, size_t size, std::string& error);
     rp_result load_content(const char* path, std::string& error);
 
     LoaderState state() const { return state_; }

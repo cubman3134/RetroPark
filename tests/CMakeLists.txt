@@ -24,7 +24,8 @@ add_executable(retropark_tests
   test_pixel_convert.cpp
   test_libretro_e2e.cpp
   test_audio_pool.cpp
-  test_audio_flow.cpp)
+  test_audio_flow.cpp
+  test_savestate.cpp)
 target_link_libraries(retropark_tests PRIVATE retropark doctest::doctest nlohmann_json::nlohmann_json retropark_libretro_convert)
 target_include_directories(retropark_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
