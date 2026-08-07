@@ -202,4 +202,9 @@ rp_result D3D11Backend::composite_and_present(uint32_t ready_index, uint64_t syn
     }
     return RP_OK;
 }
+
+rp_result D3D11Backend::composite_driven(const void*, uint32_t, uint32_t, uint32_t, bool, uint8_t*, std::string& err) {
+    err = "composite_driven not implemented yet";
+    return RP_ERR_UNSUPPORTED;
+}
 }

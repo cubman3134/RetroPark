@@ -29,7 +29,8 @@ add_library(retropark STATIC
   src/loader/Manifest.cpp
   src/loader/CoreLoader.cpp
   src/loader/Win32CoreModule.cpp
-  src/render/SurfaceRing.cpp)
+  src/render/SurfaceRing.cpp
+  src/render/FramebufferCopy.cpp)
 target_sources(retropark PRIVATE
   src/render/d3d11/D3D11Backend.cpp
   src/render/d3d11/D3D11Compositor.cpp

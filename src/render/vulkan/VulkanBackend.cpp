@@ -660,6 +660,11 @@ void VulkanBackend::destroy_composite() {
     if (compositor_ready_) { compositor_.destroy(); compositor_ready_ = false; }
 }
 
+rp_result VulkanBackend::composite_driven(const void*, uint32_t, uint32_t, uint32_t, bool, uint8_t*, std::string& err) {
+    err = "composite_driven not implemented yet";
+    return RP_ERR_UNSUPPORTED;
+}
+
 VulkanBackend::~VulkanBackend() {
     if (device_) {
         vkDeviceWaitIdle(device_);

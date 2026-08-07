@@ -13,6 +13,7 @@ public:
                                 std::vector<rp_surface_desc>& out, std::string& err) override;
     rp_result composite_and_present(uint32_t ready_index, uint64_t sync_value, bool has_frame,
                                     uint8_t* out_rgba, std::string& err) override;
+    rp_result composite_driven(const void*, uint32_t, uint32_t, uint32_t, bool, uint8_t*, std::string& err) override;
     void  present_device_uuid(uint8_t out[16]) const override { std::memcpy(out, device_uuid_, 16); }
     void* present_sync_handle() const override { return sync_handle_; }
 

@@ -6,6 +6,7 @@ add_executable(retropark_tests
   test_loader.cpp
   test_loader_ffi.cpp
   test_surface_ring.cpp
+  test_framebuffer_copy.cpp
   test_backend_iface.cpp
   test_d3d11_handoff.cpp
   test_compositor.cpp

@@ -15,6 +15,7 @@ public:
                                 std::vector<rp_surface_desc>& out, std::string& err) override;
     rp_result composite_and_present(uint32_t ready_index, uint64_t sync_value, bool has_frame,
                                     uint8_t* out_rgba, std::string& err) override;
+    rp_result composite_driven(const void*, uint32_t, uint32_t, uint32_t, bool, uint8_t*, std::string& err) override;
 
     // Test helpers.
     static bool probe_shared_keyed_mutex();
