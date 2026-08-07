@@ -37,7 +37,8 @@ target_sources(retropark PRIVATE
   src/render/vulkan/VulkanBackend.cpp
   src/render/vulkan/VulkanCompositor.cpp
   src/runtime/BackendFactory.cpp
-  src/runtime/Runtime.cpp)
+  src/runtime/Runtime.cpp
+  src/audio/AudioPool.cpp)
 target_include_directories(retropark PUBLIC include)
 target_include_directories(retropark PRIVATE src)
 target_compile_features(retropark PUBLIC cxx_std_17)
