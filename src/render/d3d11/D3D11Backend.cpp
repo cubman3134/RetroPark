@@ -142,6 +142,33 @@ rp_result D3D11Backend::readback_surface_pixel(uint32_t index, uint32_t x, uint3
     return RP_OK;
 }
 
+rp_result D3D11Backend::ensure_offscreen_target(std::string& err) {
+    if (offscreen_) return RP_OK;
+    D3D11_TEXTURE2D_DESC d{};
+    d.Width=width_; d.Height=height_; d.MipLevels=1; d.ArraySize=1;
+    d.Format=DXGI_FORMAT_R8G8B8A8_UNORM; d.SampleDesc.Count=1;
+    d.Usage=D3D11_USAGE_DEFAULT; d.BindFlags=D3D11_BIND_RENDER_TARGET;
+    if (FAILED(device_->CreateTexture2D(&d, nullptr, &offscreen_))) { err="offscreen"; return RP_ERR_DEVICE; }
+    if (FAILED(device_->CreateRenderTargetView(offscreen_.Get(), nullptr, &offscreen_rtv_))) { err="offRTV"; return RP_ERR_DEVICE; }
+    return RP_OK;
+}
+
+rp_result D3D11Backend::read_back_target(uint8_t* out_rgba, std::string& err) {
+    D3D11_TEXTURE2D_DESC sd{};
+    sd.Width=width_; sd.Height=height_; sd.MipLevels=1; sd.ArraySize=1;
+    sd.Format=DXGI_FORMAT_R8G8B8A8_UNORM; sd.SampleDesc.Count=1;
+    sd.Usage=D3D11_USAGE_STAGING; sd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> staging;
+    if (FAILED(device_->CreateTexture2D(&sd, nullptr, &staging))) { err="composite staging"; return RP_ERR_DEVICE; }
+    ctx_->CopyResource(staging.Get(), offscreen_.Get());
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (FAILED(ctx_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m))) { err="composite map"; return RP_ERR_DEVICE; }
+    for (uint32_t y=0; y<height_; ++y)
+        memcpy(out_rgba + y*width_*4, (const uint8_t*)m.pData + y*m.RowPitch, width_*4);
+    ctx_->Unmap(staging.Get(), 0);
+    return RP_OK;
+}
+
 rp_result D3D11Backend::composite_and_present(uint32_t ready_index, uint64_t sync_value, bool has_frame,
                                               uint8_t* out_rgba, std::string& err) {
     (void)sync_value;
@@ -162,12 +189,8 @@ rp_result D3D11Backend::composite_and_present(uint32_t ready_index, uint64_t syn
     // Ensure an offscreen RTV of the current size. Needed whenever there's no swapchain
     // (headless target) or a readback was requested even while windowed.
     if (!offscreen_ && (!swapchain_ || out_rgba)) {
-        D3D11_TEXTURE2D_DESC d{};
-        d.Width=width_; d.Height=height_; d.MipLevels=1; d.ArraySize=1;
-        d.Format=DXGI_FORMAT_R8G8B8A8_UNORM; d.SampleDesc.Count=1;
-        d.Usage=D3D11_USAGE_DEFAULT; d.BindFlags=D3D11_BIND_RENDER_TARGET;
-        if (FAILED(device_->CreateTexture2D(&d, nullptr, &offscreen_))) { err="offscreen"; return RP_ERR_DEVICE; }
-        if (FAILED(device_->CreateRenderTargetView(offscreen_.Get(), nullptr, &offscreen_rtv_))) { err="offRTV"; return RP_ERR_DEVICE; }
+        rp_result r = ensure_offscreen_target(err);
+        if (r != RP_OK) return r;
     }
 
     ID3D11ShaderResourceView* core_srv = nullptr;
@@ -188,18 +211,8 @@ rp_result D3D11Backend::composite_and_present(uint32_t ready_index, uint64_t syn
     if (swapchain_) swapchain_->Present(1, 0);
 
     if (out_rgba) {
-        D3D11_TEXTURE2D_DESC sd{};
-        sd.Width=width_; sd.Height=height_; sd.MipLevels=1; sd.ArraySize=1;
-        sd.Format=DXGI_FORMAT_R8G8B8A8_UNORM; sd.SampleDesc.Count=1;
-        sd.Usage=D3D11_USAGE_STAGING; sd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
-        ComPtr<ID3D11Texture2D> staging;
-        if (FAILED(device_->CreateTexture2D(&sd, nullptr, &staging))) { err="composite staging"; return RP_ERR_DEVICE; }
-        ctx_->CopyResource(staging.Get(), offscreen_.Get());
-        D3D11_MAPPED_SUBRESOURCE m{};
-        if (FAILED(ctx_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m))) { err="composite map"; return RP_ERR_DEVICE; }
-        for (uint32_t y=0; y<height_; ++y)
-            memcpy(out_rgba + y*width_*4, (const uint8_t*)m.pData + y*m.RowPitch, width_*4);
-        ctx_->Unmap(staging.Get(), 0);
+        rp_result rr = read_back_target(out_rgba, err);
+        if (rr != RP_OK) return rr;
     }
     return RP_OK;
 }
@@ -249,33 +262,23 @@ rp_result D3D11Backend::composite_driven(const void* data, uint32_t width, uint3
     }
     // Ensure an offscreen RTV of the current size, same lazy-create as composite_and_present.
     if (!offscreen_ && (!swapchain_ || out_rgba)) {
-        D3D11_TEXTURE2D_DESC d{};
-        d.Width=width_; d.Height=height_; d.MipLevels=1; d.ArraySize=1;
-        d.Format=DXGI_FORMAT_R8G8B8A8_UNORM; d.SampleDesc.Count=1;
-        d.Usage=D3D11_USAGE_DEFAULT; d.BindFlags=D3D11_BIND_RENDER_TARGET;
-        if (FAILED(device_->CreateTexture2D(&d, nullptr, &offscreen_))) { err="offscreen"; return RP_ERR_DEVICE; }
-        if (FAILED(device_->CreateRenderTargetView(offscreen_.Get(), nullptr, &offscreen_rtv_))) { err="offRTV"; return RP_ERR_DEVICE; }
+        rp_result r = ensure_offscreen_target(err);
+        if (r != RP_OK) return r;
     }
 
     ID3D11RenderTargetView* target = swapchain_ ? backbuffer_rtv_.Get() : offscreen_rtv_.Get();
-    rp_result r = compositor_.render(ctx_.Get(), target, driven_srv_.Get(), width, height, err);
+    // The driven core frame (driven_tex_, sized width x height) is scaled to fill the
+    // display target: the compositor's fullscreen triangle samples it with 0..1 UVs, so
+    // passing the display size (width_/height_) here — not the per-call core width/height —
+    // makes it fill the offscreen/backbuffer regardless of the core's native resolution.
+    rp_result r = compositor_.render(ctx_.Get(), target, driven_srv_.Get(), width_, height_, err);
     if (r != RP_OK) return r;
 
     if (swapchain_) swapchain_->Present(1, 0);
 
     if (out_rgba) {
-        D3D11_TEXTURE2D_DESC sd{};
-        sd.Width=width_; sd.Height=height_; sd.MipLevels=1; sd.ArraySize=1;
-        sd.Format=DXGI_FORMAT_R8G8B8A8_UNORM; sd.SampleDesc.Count=1;
-        sd.Usage=D3D11_USAGE_STAGING; sd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
-        ComPtr<ID3D11Texture2D> staging;
-        if (FAILED(device_->CreateTexture2D(&sd, nullptr, &staging))) { err="composite staging"; return RP_ERR_DEVICE; }
-        ctx_->CopyResource(staging.Get(), offscreen_.Get());
-        D3D11_MAPPED_SUBRESOURCE m{};
-        if (FAILED(ctx_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m))) { err="composite map"; return RP_ERR_DEVICE; }
-        for (uint32_t y=0; y<height_; ++y)
-            memcpy(out_rgba + y*width_*4, (const uint8_t*)m.pData + y*m.RowPitch, width_*4);
-        ctx_->Unmap(staging.Get(), 0);
+        rp_result rr = read_back_target(out_rgba, err);
+        if (rr != RP_OK) return rr;
     }
     return RP_OK;
 }

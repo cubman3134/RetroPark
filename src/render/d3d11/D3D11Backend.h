@@ -23,6 +23,15 @@ public:
                                      uint8_t rgba_out[4], std::string& err);
     ID3D11Device* device() const { return device_.Get(); }
 
+private:
+    // Lazily creates offscreen_/offscreen_rtv_ sized to width_/height_, if not already
+    // present. Shared by composite_and_present() and composite_driven().
+    rp_result ensure_offscreen_target(std::string& err);
+    // Copies the current offscreen_ render target into out_rgba (display-sized,
+    // width_ x height_) via a staging texture. Shared by composite_and_present() and
+    // composite_driven().
+    rp_result read_back_target(uint8_t* out_rgba, std::string& err);
+
 protected:
     struct Surface {
         Microsoft::WRL::ComPtr<ID3D11Texture2D> tex;
