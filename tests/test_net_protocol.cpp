@@ -14,7 +14,7 @@ TEST_CASE("net: crc32 known vector") {
 TEST_CASE("net: hello round-trips") {
     Hello h; h.abi_version = 5; h.content_hash = 0xDEADBEEFCAFEULL;
     h.input_delay = 3; h.start_frame = 100;
-    std::strncpy(h.core_id, "fceumm", sizeof(h.core_id) - 1);
+    std::memcpy(h.core_id, "fceumm", 6);   // core_id is zero-initialized -> stays null-terminated
     auto bytes = encode_hello(h);
     MsgType t; REQUIRE(peek_type(bytes, t)); CHECK(t == MsgType::Hello);
     Hello g; REQUIRE(decode_hello(bytes, g));
