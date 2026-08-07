@@ -40,6 +40,19 @@ rp_result rp_runtime_save_state(rp_runtime* rt, void* buf, size_t size);
    rejecting an incompatible state surfaces as an error result, not a crash. */
 rp_result rp_runtime_load_state(rp_runtime* rt, const void* buf, size_t size);
 
+/* Enable/disable the frame-by-frame rewind ring. Requires a serialize-capable driven core
+   (RP_ERR_UNSUPPORTED otherwise); RP_ERR_BAD_ARG on null rt. When enabled, each forward
+   rp_runtime_present captures the core's pre-frame state into a bounded ring of at most
+   max_snapshots entries (a sane default is used when max_snapshots is 0). Toggling clears the
+   ring. */
+rp_result rp_runtime_set_rewind(rp_runtime* rt, int enabled, uint32_t max_snapshots);
+
+/* Step the game one frame into the past: discard the newest snapshot and restore the previous
+   frame's pre-state, so the next rp_runtime_present re-renders that earlier frame (and does not
+   re-grow the ring). RP_ERR_BAD_ARG on null rt; RP_ERR_INTERNAL if rewind is disabled;
+   RP_ERR_NOT_FOUND when there is no history left to step back to. */
+rp_result rp_runtime_rewind(rp_runtime* rt);
+
 #ifdef __cplusplus
 }
 #endif

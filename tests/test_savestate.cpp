@@ -1,9 +1,11 @@
 #include <doctest/doctest.h>
 #include "loader/CoreLoader.h"
 #include "loader/Win32CoreModule.h"
+#include "runtime/RewindRing.h"
 #include <retropark/retropark.h>
 #include <retropark/retropark_abi.h>
 #include <vector>
+#include <deque>
 #include <string>
 #include <memory>
 #include <cstdint>
@@ -153,6 +155,111 @@ TEST_CASE("rp_runtime savestate: negative cases") {
         REQUIRE(sz == 4u);
         std::vector<uint8_t> small(sz - 1);
         CHECK(rp_runtime_save_state(rt, small.data(), small.size()) == RP_ERR_BAD_ARG);
+        rp_runtime_unload_core(rt);
+    }
+
+    rp_runtime_destroy(rt);
+}
+
+// ---- Task 4: rewind ring (bookkeeping unit + portable frame-by-frame e2e) ----
+
+// A. Pure ring-bookkeeping unit (no device): pushing past max drops the oldest, caps at max,
+//    order preserved; under capacity nothing is dropped.
+TEST_CASE("rewind_ring_push: bounded drop-oldest keeps newest, order preserved") {
+    auto mk = [](uint8_t v) { return std::vector<uint8_t>{v}; };
+
+    std::deque<std::vector<uint8_t>> ring;
+    const uint32_t MAX = 3;
+    for (uint8_t v = 0; v < 6; ++v) rewind_ring_push(ring, mk(v), MAX);
+    REQUIRE(ring.size() == MAX);                 // capped at max
+    CHECK(ring.front()[0] == 3);                 // oldest survivor
+    CHECK(ring.back()[0] == 5);                  // newest
+    CHECK(ring[0][0] == 3);                       // order preserved: 3,4,5
+    CHECK(ring[1][0] == 4);
+    CHECK(ring[2][0] == 5);
+
+    std::deque<std::vector<uint8_t>> under;
+    rewind_ring_push(under, mk(9), 4);
+    rewind_ring_push(under, mk(8), 4);
+    CHECK(under.size() == 2u);                    // under capacity: nothing dropped
+    CHECK(under.front()[0] == 9);
+    CHECK(under.back()[0] == 8);
+}
+
+// B. Portable rewind e2e (refcore_driven, D3D11/WARP, device-free — same harness as the
+//    savestate e2e). refcore_driven renders each frame from its counter then increments, so a
+//    snapshot is the value the NEXT run_frame renders. This proves frame-by-frame visual rewind
+//    against real pixel readbacks: rewind+present shows the SAME pixels as an earlier forward
+//    frame, consecutive rewinds step monotonically backward, and a forward present after a
+//    rewind resumes both forward motion AND capture.
+TEST_CASE("rp_runtime rewind: portable frame-by-frame backward stepping (D3D11/WARP, driven core)") {
+    const uint32_t W = 64, H = 64;
+    rp_runtime* rt = rp_runtime_create(RP_GFX_D3D11, nullptr);
+    REQUIRE(rt);
+    REQUIRE(rp_runtime_resize(rt, W, H) == RP_OK);
+    REQUIRE(rp_runtime_load_core(rt, RP_DRIVEN_CORE_DIR) == RP_OK);
+
+    REQUIRE(rp_runtime_set_rewind(rt, 1, 64) == RP_OK);
+
+    // Run M forward frames (capturing), recording each displayed frame's pixels.
+    const int M = 10;
+    std::vector<std::vector<uint8_t>> forward;
+    for (int i = 0; i < M; ++i) {
+        std::vector<uint8_t> f((size_t)W * H * 4, 0);
+        REQUIRE(rp_runtime_present(rt, f.data()) == RP_OK);
+        forward.push_back(std::move(f));
+    }
+    CHECK(forward.front() != forward.back());     // frames really animate
+
+    // Rewind K times; each rewind()+present() must display exactly one earlier forward frame.
+    // Last forward-displayed was forward[M-1]; rewind #k re-renders forward[M-1-k] — monotonic.
+    const int K = 5;
+    for (int k = 1; k <= K; ++k) {
+        REQUIRE(rp_runtime_rewind(rt) == RP_OK);
+        std::vector<uint8_t> r((size_t)W * H * 4, 0);
+        REQUIRE(rp_runtime_present(rt, r.data()) == RP_OK);
+        CHECK(r == forward[M - 1 - k]);            // stepped back exactly one
+    }
+    // Now displaying forward[M-1-K] == forward[4].
+
+    // Step 5: resume a forward present (no rewind) -> advances forward again AND resumes capture.
+    std::vector<uint8_t> fwd((size_t)W * H * 4, 0);
+    REQUIRE(rp_runtime_present(rt, fwd.data()) == RP_OK);
+    CHECK(fwd == forward[M - K]);                  // forward[5]: one step FORWARD from forward[4]
+
+    rp_runtime_unload_core(rt);
+    rp_runtime_destroy(rt);
+}
+
+// C. Rewind negative + guard cases.
+TEST_CASE("rp_runtime rewind: negative + guard cases") {
+    const uint32_t W = 64, H = 64;
+    rp_runtime* rt = rp_runtime_create(RP_GFX_D3D11, nullptr);
+    REQUIRE(rt);
+    REQUIRE(rp_runtime_resize(rt, W, H) == RP_OK);
+
+    SUBCASE("null rt") {
+        CHECK(rp_runtime_set_rewind(nullptr, 1, 64) == RP_ERR_BAD_ARG);
+        CHECK(rp_runtime_rewind(nullptr) == RP_ERR_BAD_ARG);
+    }
+
+    SUBCASE("set_rewind with no serialize-capable core -> UNSUPPORTED") {
+        CHECK(rp_runtime_set_rewind(rt, 1, 64) == RP_ERR_UNSUPPORTED);
+    }
+
+    SUBCASE("rewind while disabled -> INTERNAL") {
+        REQUIRE(rp_runtime_load_core(rt, RP_DRIVEN_CORE_DIR) == RP_OK);
+        CHECK(rp_runtime_rewind(rt) == RP_ERR_INTERNAL);   // enabled never set
+        rp_runtime_unload_core(rt);
+    }
+
+    SUBCASE("rewind with too little history -> NOT_FOUND, no crash") {
+        REQUIRE(rp_runtime_load_core(rt, RP_DRIVEN_CORE_DIR) == RP_OK);
+        REQUIRE(rp_runtime_set_rewind(rt, 1, 64) == RP_OK);
+        CHECK(rp_runtime_rewind(rt) == RP_ERR_NOT_FOUND);  // empty ring
+        std::vector<uint8_t> f((size_t)W * H * 4, 0);
+        REQUIRE(rp_runtime_present(rt, f.data()) == RP_OK);
+        CHECK(rp_runtime_rewind(rt) == RP_ERR_NOT_FOUND);  // ring size 1 (< 2)
         rp_runtime_unload_core(rt);
     }
 
