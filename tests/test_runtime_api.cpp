@@ -40,3 +40,12 @@ TEST_CASE("runtime: unsupported api yields a usable-but-erroring runtime, no cra
     CHECK(rp_runtime_present(rt, nullptr) == RP_ERR_DEVICE);
     rp_runtime_destroy(rt);
 }
+
+TEST_CASE("runtime: load_content on a core without load_content is unsupported") {
+    rp_runtime* rt = rp_runtime_create(RP_GFX_D3D11, nullptr);
+    REQUIRE(rt);
+    REQUIRE(rp_runtime_resize(rt, 64, 64) == RP_OK);
+    // no core loaded yet -> content load has nothing to target
+    CHECK(rp_runtime_load_content(rt, "whatever.nes") == RP_ERR_INTERNAL);
+    rp_runtime_destroy(rt);
+}

@@ -5,3 +5,5 @@
 *.dll
 *.pdb
 *.ilk
+external/libretro-cores/
+*.nes

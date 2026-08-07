@@ -59,6 +59,12 @@ rp_result CoreLoader::get_av_info(rp_av_info* out, std::string& error) {
     return RP_OK;
 }
 
+rp_result CoreLoader::load_content(const char* path, std::string& error) {
+    if (state_ != LoaderState::Created && state_ != LoaderState::Started) { error = "load_content needs Created"; return RP_ERR_INTERNAL; }
+    if (!abi_->load_content) { error = "core has no load_content"; return RP_ERR_UNSUPPORTED; }
+    return abi_->load_content(core_, path);
+}
+
 void CoreLoader::destroy() {
     if (state_ == LoaderState::Started) { std::string e; stop(e); }
     if (core_ && abi_ && abi_->destroy) abi_->destroy(core_);

@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define RETROPARK_ABI_VERSION 3u
+#define RETROPARK_ABI_VERSION 4u
 #define RP_CORE_ABI_EXPORT_NAME "rp_get_core_abi"
 
 typedef enum rp_result {
@@ -99,6 +99,7 @@ typedef struct rp_core_abi {
     size_t    (*serialize_size)(rp_core* core);
     rp_result (*serialize)(rp_core* core, void* data, size_t size);
     rp_result (*unserialize)(rp_core* core, const void* data, size_t size);
+    rp_result (*load_content)(rp_core* core, const char* path);
 } rp_core_abi;
 
 typedef const rp_core_abi* (*rp_get_core_abi_fn)(void);

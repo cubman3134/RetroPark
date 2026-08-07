@@ -15,6 +15,7 @@ void        rp_runtime_destroy(rp_runtime* rt);
 
 rp_result   rp_runtime_load_core(rp_runtime* rt, const char* core_dir);
 rp_result   rp_runtime_unload_core(rp_runtime* rt);
+rp_result   rp_runtime_load_content(rp_runtime* rt, const char* path);
 
 rp_result   rp_runtime_resize(rp_runtime* rt, uint32_t width, uint32_t height);
 void        rp_runtime_set_input(rp_runtime* rt, const rp_input_state* in);
