@@ -65,13 +65,15 @@ target_include_directories(retropark PRIVATE "${VK_GEN_DIR}")
 add_subdirectory(cores/refcore_present)
 add_subdirectory(cores/refcore_present_vk)
 add_subdirectory(cores/refcore_driven)
-add_subdirectory(harness/windowed)
 
 add_library(retropark_libretro_convert STATIC cores/libretro_shim/PixelConvert.cpp)
 target_include_directories(retropark_libretro_convert PUBLIC cores/libretro_shim external/libretro)
 
 # The libretro shim driven core (links the convert lib defined above).
 add_subdirectory(cores/libretro_shim)
+
+# The windowed harness depends on LibretroShim (above) for its --content path.
+add_subdirectory(harness/windowed)
 
 enable_testing()
 add_subdirectory(tests)
