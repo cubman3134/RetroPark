@@ -42,7 +42,8 @@ target_sources(retropark PRIVATE
   src/audio/XAudio2Output.cpp
   src/net/NetProtocol.cpp
   src/net/LoopbackTransport.cpp
-  src/net/TcpTransport.cpp)
+  src/net/TcpTransport.cpp
+  src/net/NetSession.cpp)
 target_include_directories(retropark PUBLIC include)
 target_include_directories(retropark PRIVATE src)
 target_compile_features(retropark PUBLIC cxx_std_17)
