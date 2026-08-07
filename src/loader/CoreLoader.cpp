@@ -59,6 +59,23 @@ rp_result CoreLoader::get_av_info(rp_av_info* out, std::string& error) {
     return RP_OK;
 }
 
+size_t CoreLoader::serialize_size() {
+    if ((state_ != LoaderState::Created && state_ != LoaderState::Started) || !abi_ || !abi_->serialize_size) return 0;
+    return abi_->serialize_size(core_);
+}
+
+rp_result CoreLoader::serialize(void* data, size_t size, std::string& error) {
+    if (state_ != LoaderState::Created && state_ != LoaderState::Started) { error = "serialize needs Created"; return RP_ERR_INTERNAL; }
+    if (!abi_->serialize) { error = "core has no serialize"; return RP_ERR_UNSUPPORTED; }
+    return abi_->serialize(core_, data, size);
+}
+
+rp_result CoreLoader::unserialize(const void* data, size_t size, std::string& error) {
+    if (state_ != LoaderState::Created && state_ != LoaderState::Started) { error = "unserialize needs Created"; return RP_ERR_INTERNAL; }
+    if (!abi_->unserialize) { error = "core has no unserialize"; return RP_ERR_UNSUPPORTED; }
+    return abi_->unserialize(core_, data, size);
+}
+
 rp_result CoreLoader::load_content(const char* path, std::string& error) {
     if (state_ != LoaderState::Created && state_ != LoaderState::Started) { error = "load_content needs Created"; return RP_ERR_INTERNAL; }
     if (!abi_->load_content) { error = "core has no load_content"; return RP_ERR_UNSUPPORTED; }
