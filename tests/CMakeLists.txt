@@ -20,8 +20,9 @@ add_executable(retropark_tests
   test_vulkan_e2e.cpp
   test_driven_upload_d3d11.cpp
   test_driven_upload_vulkan.cpp
-  test_driven_e2e.cpp)
-target_link_libraries(retropark_tests PRIVATE retropark doctest::doctest nlohmann_json::nlohmann_json)
+  test_driven_e2e.cpp
+  test_pixel_convert.cpp)
+target_link_libraries(retropark_tests PRIVATE retropark doctest::doctest nlohmann_json::nlohmann_json retropark_libretro_convert)
 target_include_directories(retropark_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 set(PROBE_HDR "${CMAKE_CURRENT_BINARY_DIR}/gen/probe_vert_generated.h")

@@ -67,5 +67,8 @@ add_subdirectory(cores/refcore_present_vk)
 add_subdirectory(cores/refcore_driven)
 add_subdirectory(harness/windowed)
 
+add_library(retropark_libretro_convert STATIC cores/libretro_shim/PixelConvert.cpp)
+target_include_directories(retropark_libretro_convert PUBLIC cores/libretro_shim external/libretro)
+
 enable_testing()
 add_subdirectory(tests)
