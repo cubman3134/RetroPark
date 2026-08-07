@@ -21,7 +21,8 @@ add_executable(retropark_tests
   test_driven_upload_d3d11.cpp
   test_driven_upload_vulkan.cpp
   test_driven_e2e.cpp
-  test_pixel_convert.cpp)
+  test_pixel_convert.cpp
+  test_libretro_e2e.cpp)
 target_link_libraries(retropark_tests PRIVATE retropark doctest::doctest nlohmann_json::nlohmann_json retropark_libretro_convert)
 target_include_directories(retropark_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
@@ -56,3 +57,11 @@ target_compile_definitions(retropark_tests PRIVATE
 add_dependencies(retropark_tests refcore_driven)
 target_compile_definitions(retropark_tests PRIVATE
   RP_DRIVEN_CORE_DIR="$<TARGET_FILE_DIR:refcore_driven>/cores/refcore_driven")
+
+# libretro e2e test loads the emitted libretro_shim package (LibretroShim.dll + core.json
+# + fceumm_libretro.dll, if present) and a real NES ROM; depend on the shim target and tell
+# the test where its package lands + where NES ROMs live on this machine.
+add_dependencies(retropark_tests LibretroShim)
+target_compile_definitions(retropark_tests PRIVATE
+  RP_SHIM_DIR="$<TARGET_FILE_DIR:LibretroShim>/cores/libretro_shim"
+  RP_NES_ROM_DIR="C:/RetroBat/roms/nes")
