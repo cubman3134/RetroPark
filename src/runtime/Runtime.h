@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <memory>
 #include <string>
 #include <mutex>
@@ -65,8 +66,8 @@ private:
     bool requires_content_ = false;
     bool content_loaded_ = false;
     std::unique_ptr<IAudioOutput> audio_;
-    uint64_t audio_frames_ = 0;
-    bool audio_nonsilent_ = false;
+    std::atomic<uint64_t> audio_frames_{0};
+    std::atomic<bool>     audio_nonsilent_{false};
 
     // Rewind ring: bounded uncompressed per-frame snapshots of the driven core's pre-frame
     // state, captured at the top of each forward present(). See RewindRing.h / spec §2.

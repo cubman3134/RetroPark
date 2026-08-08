@@ -33,6 +33,7 @@ a single device, and out-of-process-ready (PCM over the ABI is trivial to ship o
 | Rate delivery | Reuse the **existing `get_av_info` hook**: wire `dp_get_av_info` to report `sample_rate = mixer rate (48000)`, channels 2. The Runtime reads it to open audio at the right rate. No ABI change. |
 | Consumer | **Unchanged.** `Runtime::on_audio_sample → XAudio2Output` is already wired from Slice E. |
 | Sync | **Deferred.** Stereo s16 48 kHz, accept minor A/V drift (Dolphin is throttled to the present rate ≈ realtime; XAudio2 buffering absorbs jitter). No audio-driven emulation-speed sync in this slice. |
+| Boot config | **Shortened silent boot.** The vehicle seeds `MAIN_SKIP_IPL` + `MAIN_FAST_DISC_SPEED` so the game's first audio arrives within the test's capture window. A boot-behavior change only — correctness-neutral for rendered content and DSP audio. |
 
 ---
 
