@@ -66,6 +66,12 @@ add_dependencies(retropark_tests refcore_driven)
 target_compile_definitions(retropark_tests PRIVATE
   RP_DRIVEN_CORE_DIR="$<TARGET_FILE_DIR:refcore_driven>/cores/refcore_driven")
 
+# rollback unit test loads the real reference rollback core built by
+# cores/refcore_rollback; depend on it and tell the test where its DLL + core.json land.
+add_dependencies(retropark_tests refcore_rollback)
+target_compile_definitions(retropark_tests PRIVATE
+  RP_ROLLBACK_CORE_DIR="$<TARGET_FILE_DIR:refcore_rollback>/cores/refcore_rollback")
+
 # libretro e2e test loads the emitted libretro_shim package (LibretroShim.dll + core.json
 # + fceumm_libretro.dll, if present) and a real NES ROM; depend on the shim target and tell
 # the test where its package lands + where NES ROMs live on this machine.
