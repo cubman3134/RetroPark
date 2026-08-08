@@ -67,18 +67,29 @@ TEST_CASE("dolphin core: Runtime loads dolphin_present + a GC ISO and presents i
 
     // Dolphin boots over a few seconds; present() returns non-OK until the first XFB frame lands in the
     // ring. Poll for the first good frame, then keep pumping to capture an early and a late frame.
+    // The video/overlay proof is captured by frame 240 (the settled early-boot frame). Dolphin's boot
+    // logos are SILENT for the first ~13 game-seconds, though, and the lock-step present throttles
+    // emulation to the host's consume rate (~1 game-frame per present), so audio does not begin until
+    // several hundred more frames in. After the video proof is captured we therefore keep pumping
+    // present() (advancing the emulation) until the device-independent audio counters go non-silent,
+    // bounded by a hard frame cap so a genuinely silent core still terminates and fails.
     std::vector<uint8_t> img(W * H * 4, 0), early, late;
     int good = 0;
     fprintf(stderr, "[dolphin-core] booting via Runtime; polling present()...\n"); fflush(stderr);
-    for (int i = 0; i < 600; ++i) {
+    for (int i = 0; i < 3000; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         rp_result pr = rp_runtime_present(rt, img.data());
         if (pr != RP_OK) continue;
         ++good;
         if (good == 30) early = img;               // a settled early frame
-        if (good >= 30) late = img;                // keep the latest
+        if (good <= 240) late = img;               // freeze the late frame at the settled boot screen
         if (good % 60 == 0) { fprintf(stderr, "[dolphin-core] %d frames presented\n", good); fflush(stderr); }
-        if (good >= 240) break;
+        if (good >= 240) {
+            // Video/overlay proof captured; keep advancing until the game's boot reaches audio.
+            uint64_t af = 0; int ans = 0;
+            rp_runtime_audio_stats(rt, &af, &ans);
+            if (ans || good >= 1500) break;
+        }
     }
     fprintf(stderr, "[dolphin-core] presented %d good frames total\n", good); fflush(stderr);
 

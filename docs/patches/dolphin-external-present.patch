@@ -76,10 +76,10 @@ index 0000000000..ee309235fb
 +</Project>
 diff --git a/Source/Core/DolphinNoGUI/rp_dolphin.cpp b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
 new file mode 100644
-index 0000000000..a10f89d021
+index 0000000000..e3caf9da0f
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
-@@ -0,0 +1,492 @@
+@@ -0,0 +1,546 @@
 +// RetroPark: dolphin_present.dll — in-process vehicle. Boots Dolphin NORMAL HEADLESS on Vulkan, and a
 +// copy-from-XFB producer hooks after_present_event: each present it blits Dolphin's just-rendered XFB
 +// image into the host's imported shared VkImage (own command buffer + QFOT release + timeline signal,
@@ -118,6 +118,11 @@ index 0000000000..a10f89d021
 +
 +#include "VideoBackends/Vulkan/VKTexture.h"
 +#include "VideoBackends/Vulkan/VulkanContext.h"
++
++#include <vector>
++
++#include "AudioCommon/Mixer.h"
++#include "AudioCommon/SoundStream.h"
 +
 +#include "retropark/retropark_abi.h"  // RetroPark C ABI: rp_core_abi / rp_host_iface / rp_surface_set
 +
@@ -407,6 +412,18 @@ index 0000000000..a10f89d021
 +  // submit worker on the same graphics queue.
 +  Config::SetBaseOrCurrent(Config::GFX_BACKEND_MULTITHREADING, false);
 +
++  // Host-owned audio (Slice L): Dolphin opens NO device — the DSP still feeds the SoundStream's Mixer,
++  // and our puller thread (below) pulls that mix and forwards it to the host via rp_host.audio_sample.
++  Config::SetBaseOrCurrent(Config::MAIN_AUDIO_BACKEND, BACKEND_NULLSOUND);
++
++  // Fast-boot the vehicle to the audio-producing part of the game: the lock-step present throttles
++  // emulation to the host's consume rate, so only a few game-seconds elapse in the gated capture window.
++  // Skip the GC IPL and speed up the disc transfer so the apploader/load (a silent white screen that
++  // otherwise eats the whole window) completes in far fewer game-frames and the game reaches its
++  // logo/title audio before the capture ends.
++  Config::SetBaseOrCurrent(Config::MAIN_SKIP_IPL, true);
++  Config::SetBaseOrCurrent(Config::MAIN_FAST_DISC_SPEED, true);
++
 +  // Create a HIDDEN Win32 window so Dolphin's present path runs (fires after_present_event + populates
 +  // the current XFB) — pure headless skips presentation entirely, so the XFB is never available there.
 +  // The window is never shown; Dolphin's own swapchain presents to it invisibly, and our producer
@@ -436,6 +453,29 @@ index 0000000000..a10f89d021
 +      rom, BootSessionData(std::nullopt, DeleteSavestateAfterBoot::No));
 +  if (boot && BootManager::BootCore(system, std::move(boot), wsi))
 +  {
++    // Audio puller (Slice L): NullSound::Init() zeroes the mixer output rate, so latch it back to
++    // 48 kHz on the first valid SoundStream, then pull ~10 ms chunks of interleaved stereo s16 and
++    // forward them to the host. Runs only in rp_core mode (rp_host.audio_sample set by dp_set_surfaces);
++    // the Slice-J direct C-API path leaves it null, so audio stays silent there — unchanged. Pacing is
++    // naive wall-clock (A/V sync is a deferred slice); XAudio2's queue absorbs the jitter.
++    std::thread audio_thread([&system]() {
++      constexpr std::size_t kFrames = 480;  // ~10 ms @ 48 kHz
++      std::vector<int16_t> buf(kFrames * 2, 0);
++      bool rate_set = false;
++      while (g_running.load(std::memory_order_acquire))
++      {
++        SoundStream* ss = system.GetSoundStream();
++        if (ss && g_producer.rp_host.audio_sample)
++        {
++          if (!rate_set) { ss->GetMixer()->SetSampleRate(48000); rate_set = true; }
++          std::size_t got = ss->GetMixer()->Mix(buf.data(), kFrames);
++          if (got > 0)
++            g_producer.rp_host.audio_sample(g_producer.rp_host.host, buf.data(), got);
++        }
++        std::this_thread::sleep_for(std::chrono::milliseconds(10));
++      }
++    });
++
 +    while (g_running.load(std::memory_order_acquire))
 +    {
 +      MSG msg;
@@ -447,6 +487,9 @@ index 0000000000..a10f89d021
 +      Core::HostDispatchJobs(system);
 +      std::this_thread::sleep_for(std::chrono::milliseconds(2));
 +    }
++    // Stop pulling BEFORE Core::Shutdown destroys the SoundStream/Mixer.
++    if (audio_thread.joinable())
++      audio_thread.join();
 +    Core::Stop(system);
 +    Core::Shutdown(system);
 +  }
@@ -564,10 +607,21 @@ index 0000000000..a10f89d021
 +  StopDolphinThread();
 +  return RP_OK;
 +}
++void dp_get_av_info(rp_core*, rp_av_info* out)
++{
++  // Dolphin's SoundStream mixer runs at a fixed 48 kHz (we force it there after the Null backend zeroes
++  // it); the producer pulls that mix and forwards interleaved stereo s16, so the host opens XAudio2 at
++  // this rate. Geometry is unused (presenting core, not driven-validated). Constant to avoid racing the
++  // async boot — the Runtime queries this right after start(), before the SoundStream may exist.
++  out->fps = 0.0;
++  out->sample_rate = 48000.0;
++  out->base_width = 0; out->base_height = 0; out->max_width = 0; out->max_height = 0;
++  out->pixel_format = 0;
++}
 +
 +const rp_core_abi kAbi = {
-+    RETROPARK_ABI_VERSION, dp_get_info,    dp_create,   dp_destroy, dp_set_surfaces,
-+    dp_start,              dp_stop,        nullptr,     nullptr,    nullptr,
++    RETROPARK_ABI_VERSION, dp_get_info,    dp_create,      dp_destroy, dp_set_surfaces,
++    dp_start,              dp_stop,        dp_get_av_info, nullptr,    nullptr,
 +    nullptr,               nullptr,        dp_load_content};
 +}  // namespace
 +
