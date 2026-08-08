@@ -44,7 +44,8 @@ target_sources(retropark PRIVATE
   src/net/LoopbackTransport.cpp
   src/net/TcpTransport.cpp
   src/net/NetSession.cpp
-  src/net/RollbackPredict.cpp)
+  src/net/RollbackPredict.cpp
+  src/net/RollbackSession.cpp)
 target_include_directories(retropark PUBLIC include)
 target_include_directories(retropark PRIVATE src)
 target_compile_features(retropark PUBLIC cxx_std_17)

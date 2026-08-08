@@ -30,7 +30,8 @@ add_executable(retropark_tests
   test_net_transport.cpp
   test_input_ports.cpp
   test_netplay_e2e.cpp
-  test_rollback_unit.cpp)
+  test_rollback_unit.cpp
+  test_rollback_e2e.cpp)
 target_link_libraries(retropark_tests PRIVATE retropark doctest::doctest nlohmann_json::nlohmann_json retropark_libretro_convert)
 target_include_directories(retropark_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
