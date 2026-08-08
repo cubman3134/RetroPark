@@ -1,5 +1,5 @@
 diff --git a/Source/Core/VideoBackends/Vulkan/VKMain.cpp b/Source/Core/VideoBackends/Vulkan/VKMain.cpp
-index 6338e52e3d..766f4ddc16 100644
+index 6338e52e3d..c0453f3658 100644
 --- a/Source/Core/VideoBackends/Vulkan/VKMain.cpp
 +++ b/Source/Core/VideoBackends/Vulkan/VKMain.cpp
 @@ -165,6 +165,20 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
@@ -23,6 +23,332 @@ index 6338e52e3d..766f4ddc16 100644
    // Now we can create the Vulkan device. VulkanContext takes ownership of the instance and surface.
    g_vulkan_context =
        VulkanContext::Create(instance, gpu_list[selected_adapter_index], surface, enable_debug_utils,
+@@ -198,7 +212,19 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
+ 
+   // Create swap chain. This has to be done early so that the target size is correct for auto-scale.
+   std::unique_ptr<SwapChain> swap_chain;
+-  if (surface != VK_NULL_HANDLE)
++  if (rp_external.enabled)
++  {
++    // RetroPark: render into the host's imported external VkImage instead of a real swapchain.
++    // IsHeadless() stays false (swap_chain non-null) so the present path runs.
++    swap_chain = SwapChain::CreateExternal(rp_external);
++    if (!swap_chain)
++    {
++      ERROR_LOG_FMT(VIDEO, "RetroPark: failed to create external present target.");
++      Shutdown();
++      return false;
++    }
++  }
++  else if (surface != VK_NULL_HANDLE)
+   {
+     swap_chain = SwapChain::Create(wsi, surface, g_ActiveConfig.bVSyncActive);
+     if (!swap_chain)
+@@ -211,8 +237,7 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
+ 
+   // Create command buffers. We do this separately because the other classes depend on it.
+   g_command_buffer_mgr = std::make_unique<CommandBufferManager>(g_Config.bBackendMultithreading);
+-  size_t swapchain_image_count =
+-      surface != VK_NULL_HANDLE ? swap_chain->GetSwapChainImageCount() : 0;
++  size_t swapchain_image_count = swap_chain ? swap_chain->GetSwapChainImageCount() : 0;
+   if (!g_command_buffer_mgr->Initialize(swapchain_image_count))
+   {
+     PanicAlertFmt("Failed to create Vulkan command buffers");
+diff --git a/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp b/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
+index 370e22d15c..86198378ca 100644
+--- a/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
++++ b/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
+@@ -31,9 +31,188 @@ SwapChain::SwapChain(const WindowSystemInfo& wsi, VkSurfaceKHR surface, bool vsy
+ 
+ SwapChain::~SwapChain()
+ {
++  // RetroPark: in external mode WE own the image + memory + imported timeline (adopted textures do
++  // not destroy the image), so grab the image handle before the image vector is cleared.
++  const VkImage ext_image =
++      (m_external && !m_swap_chain_images.empty()) ? m_swap_chain_images[0].image : VK_NULL_HANDLE;
++
+   DestroySwapChainImages();
+   DestroySwapChain();
+   DestroySurface();
++
++  if (m_external)
++  {
++    VkDevice dev = g_vulkan_context->GetDevice();
++    if (m_ext_timeline != VK_NULL_HANDLE)
++      vkDestroySemaphore(dev, m_ext_timeline, nullptr);
++    if (ext_image != VK_NULL_HANDLE)
++      vkDestroyImage(dev, ext_image, nullptr);
++    if (m_ext_memory != VK_NULL_HANDLE)
++      vkFreeMemory(dev, m_ext_memory, nullptr);
++  }
++}
++
++// RetroPark external-mode constructor: no real surface/swapchain, no fullscreen probing.
++SwapChain::SwapChain() : m_surface(VK_NULL_HANDLE), m_vsync_enabled(false)
++{
++  m_external = true;
++}
++
++std::unique_ptr<SwapChain> SwapChain::CreateExternal(const RetroParkExternalPresent& ext)
++{
++  std::unique_ptr<SwapChain> swap_chain(new SwapChain());
++  swap_chain->m_width = ext.width;
++  swap_chain->m_height = ext.height;
++  swap_chain->m_layers = 1;
++  swap_chain->m_texture_format = AbstractTextureFormat::RGBA8;
++  swap_chain->m_surface_format.format = VK_FORMAT_R8G8B8A8_UNORM;
++  swap_chain->m_surface_format.colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
++  if (!swap_chain->SetupExternalImageAndTimeline(ext))
++    return nullptr;
++  return swap_chain;
++}
++
++bool SwapChain::SetupExternalImageAndTimeline(const RetroParkExternalPresent& ext)
++{
++  VkDevice dev = g_vulkan_context->GetDevice();
++  VkPhysicalDevice phys = g_vulkan_context->GetPhysicalDevice();
++
++  // Create an image whose VkImageCreateInfo BYTE-MATCHES the host's exported image
++  // (RetroPark VulkanBackend::allocate_surfaces): R8G8B8A8_UNORM, OPTIMAL,
++  // TRANSFER_DST|TRANSFER_SRC|COLOR_ATTACHMENT|SAMPLED, external-memory OPAQUE_WIN32.
++  VkExternalMemoryImageCreateInfo ext_image_ci = {};
++  ext_image_ci.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
++  ext_image_ci.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
++
++  VkImageCreateInfo ici = {};
++  ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
++  ici.pNext = &ext_image_ci;
++  ici.imageType = VK_IMAGE_TYPE_2D;
++  ici.format = VK_FORMAT_R8G8B8A8_UNORM;
++  ici.extent = {ext.width, ext.height, 1};
++  ici.mipLevels = 1;
++  ici.arrayLayers = 1;
++  ici.samples = VK_SAMPLE_COUNT_1_BIT;
++  ici.tiling = VK_IMAGE_TILING_OPTIMAL;
++  ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
++              VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
++  ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++  ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++
++  VkImage image = VK_NULL_HANDLE;
++  if (vkCreateImage(dev, &ici, nullptr, &image) != VK_SUCCESS)
++  {
++    ERROR_LOG_FMT(VIDEO, "RetroPark: vkCreateImage (external) failed");
++    return false;
++  }
++
++  VkMemoryRequirements req;
++  vkGetImageMemoryRequirements(dev, image, &req);
++
++  VkPhysicalDeviceMemoryProperties mem_props;
++  vkGetPhysicalDeviceMemoryProperties(phys, &mem_props);
++  u32 mem_type = UINT32_MAX;
++  for (u32 i = 0; i < mem_props.memoryTypeCount; i++)
++  {
++    if ((req.memoryTypeBits & (1u << i)) &&
++        (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
++    {
++      mem_type = i;
++      break;
++    }
++  }
++  if (mem_type == UINT32_MAX)
++  {
++    ERROR_LOG_FMT(VIDEO, "RetroPark: no device-local memory type for external image");
++    vkDestroyImage(dev, image, nullptr);
++    return false;
++  }
++
++  VkImportMemoryWin32HandleInfoKHR import_info = {};
++  import_info.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
++  import_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
++  import_info.handle = ext.image_handle;  // host retains ownership; do not close
++
++  VkMemoryDedicatedAllocateInfo dedicated = {};
++  dedicated.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
++  dedicated.image = image;
++  dedicated.pNext = &import_info;
++
++  VkMemoryAllocateInfo mai = {};
++  mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
++  mai.pNext = &dedicated;
++  mai.allocationSize = req.size;
++  mai.memoryTypeIndex = mem_type;
++
++  if (vkAllocateMemory(dev, &mai, nullptr, &m_ext_memory) != VK_SUCCESS)
++  {
++    ERROR_LOG_FMT(VIDEO, "RetroPark: import external image memory failed");
++    vkDestroyImage(dev, image, nullptr);
++    return false;
++  }
++  if (vkBindImageMemory(dev, image, m_ext_memory, 0) != VK_SUCCESS)
++  {
++    ERROR_LOG_FMT(VIDEO, "RetroPark: bind external image memory failed");
++    vkDestroyImage(dev, image, nullptr);
++    return false;
++  }
++
++  // Wrap the imported image as a render-target texture + framebuffer (mirrors SetupSwapChainImages).
++  const TextureConfig texture_config(m_width, m_height, 1, m_layers, 1, m_texture_format,
++                                     AbstractTextureFlag_RenderTarget,
++                                     AbstractTextureType::Texture_2DArray);
++  SwapChainImage sci;
++  sci.image = image;
++  sci.texture = VKTexture::CreateAdopted(texture_config, image, VK_IMAGE_VIEW_TYPE_2D,
++                                         VK_IMAGE_LAYOUT_UNDEFINED);
++  if (!sci.texture)
++  {
++    ERROR_LOG_FMT(VIDEO, "RetroPark: CreateAdopted (external) failed");
++    return false;
++  }
++  sci.framebuffer = VKFramebuffer::Create(sci.texture.get(), nullptr, {});
++  if (!sci.framebuffer)
++  {
++    ERROR_LOG_FMT(VIDEO, "RetroPark: framebuffer (external) failed");
++    return false;
++  }
++  m_swap_chain_images.emplace_back(std::move(sci));
++  m_current_swap_chain_image_index = 0;
++  m_current_swap_chain_image_is_valid = true;
++
++  // Import the host's timeline semaphore.
++  VkSemaphoreTypeCreateInfo type_info = {};
++  type_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
++  type_info.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
++  type_info.initialValue = 0;
++  VkSemaphoreCreateInfo sem_info = {};
++  sem_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
++  sem_info.pNext = &type_info;
++  if (vkCreateSemaphore(dev, &sem_info, nullptr, &m_ext_timeline) != VK_SUCCESS)
++  {
++    ERROR_LOG_FMT(VIDEO, "RetroPark: create timeline semaphore failed");
++    return false;
++  }
++  auto pfnImportSem = reinterpret_cast<PFN_vkImportSemaphoreWin32HandleKHR>(
++      vkGetDeviceProcAddr(dev, "vkImportSemaphoreWin32HandleKHR"));
++  if (!pfnImportSem)
++  {
++    ERROR_LOG_FMT(VIDEO, "RetroPark: vkImportSemaphoreWin32HandleKHR not available");
++    return false;
++  }
++  VkImportSemaphoreWin32HandleInfoKHR isi = {};
++  isi.sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_WIN32_HANDLE_INFO_KHR;
++  isi.semaphore = m_ext_timeline;
++  isi.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
++  isi.handle = ext.timeline_handle;  // host retains ownership
++  if (pfnImportSem(dev, &isi) != VK_SUCCESS)
++  {
++    ERROR_LOG_FMT(VIDEO, "RetroPark: import timeline semaphore failed");
++    return false;
++  }
++
++  INFO_LOG_FMT(VIDEO, "RetroPark: external present target ready ({}x{})", ext.width, ext.height);
++  return true;
+ }
+ 
+ VkSurfaceKHR SwapChain::CreateVulkanSurface(VkInstance instance, const WindowSystemInfo& wsi)
+@@ -488,6 +667,14 @@ void SwapChain::DestroySwapChain()
+ 
+ VkResult SwapChain::AcquireNextImage()
+ {
++  // RetroPark: the external image is always "acquired" (single fixed backbuffer, no vkAcquire).
++  if (m_external)
++  {
++    m_current_swap_chain_image_index = 0;
++    m_current_swap_chain_image_is_valid = true;
++    return VK_SUCCESS;
++  }
++
+   VkResult res = vkAcquireNextImageKHR(g_vulkan_context->GetDevice(), m_swap_chain, UINT64_MAX,
+                                        g_command_buffer_mgr->GetCurrentCommandBufferSemaphore(),
+                                        VK_NULL_HANDLE, &m_current_swap_chain_image_index);
+@@ -502,6 +689,9 @@ VkResult SwapChain::AcquireNextImage()
+ 
+ bool SwapChain::ResizeSwapChain()
+ {
++  if (m_external)  // RetroPark: external image is a fixed backbuffer, never resized.
++    return true;
++
+   DestroySwapChainImages();
+   if (!CreateSwapChain() || !SetupSwapChainImages())
+   {
+@@ -514,6 +704,9 @@ bool SwapChain::ResizeSwapChain()
+ 
+ bool SwapChain::RecreateSwapChain()
+ {
++  if (m_external)  // RetroPark: no real swapchain to recreate.
++    return true;
++
+   DestroySwapChainImages();
+   DestroySwapChain();
+   if (!CreateSwapChain() || !SetupSwapChainImages())
+@@ -570,6 +763,9 @@ bool SwapChain::SetFullscreenState(bool state)
+ 
+ bool SwapChain::RecreateSurface(void* native_handle)
+ {
++  if (m_external)  // RetroPark: no OS surface in external mode.
++    return true;
++
+   // Destroy the old swap chain, images, and surface.
+   DestroySwapChainImages();
+   DestroySwapChain();
+diff --git a/Source/Core/VideoBackends/Vulkan/VKSwapChain.h b/Source/Core/VideoBackends/Vulkan/VKSwapChain.h
+index 17334dbf97..99f495700a 100644
+--- a/Source/Core/VideoBackends/Vulkan/VKSwapChain.h
++++ b/Source/Core/VideoBackends/Vulkan/VKSwapChain.h
+@@ -17,6 +17,7 @@ class CommandBufferManager;
+ class ObjectCache;
+ class VKTexture;
+ class VKFramebuffer;
++struct RetroParkExternalPresent;
+ 
+ class SwapChain
+ {
+@@ -31,6 +32,21 @@ public:
+   static std::unique_ptr<SwapChain> Create(const WindowSystemInfo& wsi, VkSurfaceKHR surface,
+                                            bool vsync);
+ 
++  // RetroPark: create a "swap chain" whose single backbuffer is an imported EXTERNAL VkImage
++  // (shared from the host's VkDevice) instead of a real VkSwapchainKHR. IsHeadless() stays false,
++  // so Dolphin's present path runs and renders the final frame into our image; PresentBackbuffer
++  // signals the imported timeline semaphore instead of vkQueuePresentKHR.
++  static std::unique_ptr<SwapChain> CreateExternal(const RetroParkExternalPresent& ext);
++  bool IsExternal() const { return m_external; }
++  VkSemaphore GetExternalTimeline() const { return m_ext_timeline; }
++  // Next per-frame timeline value to signal (2*frame), matching the Slice B produce/consume protocol.
++  u64 NextExternalSignalValue()
++  {
++    const u64 v = 2 * m_ext_frame;
++    ++m_ext_frame;
++    return v;
++  }
++
+   VkSurfaceKHR GetSurface() const { return m_surface; }
+   VkSurfaceFormatKHR GetSurfaceFormat() const { return m_surface_format; }
+   AbstractTextureFormat GetTextureFormat() const { return m_texture_format; }
+@@ -73,6 +89,9 @@ public:
+   bool SetFullscreenState(bool state);
+ 
+ private:
++  SwapChain();  // RetroPark external-mode constructor
++  bool SetupExternalImageAndTimeline(const RetroParkExternalPresent& ext);
++
+   bool SelectSurfaceFormat();
+   bool SelectPresentMode();
+ 
+@@ -109,6 +128,12 @@ private:
+   u32 m_width = 0;
+   u32 m_height = 0;
+   u32 m_layers = 0;
++
++  // RetroPark external-present mode: the backbuffer is an imported external VkImage + timeline.
++  bool m_external = false;
++  VkDeviceMemory m_ext_memory = VK_NULL_HANDLE;
++  VkSemaphore m_ext_timeline = VK_NULL_HANDLE;
++  u64 m_ext_frame = 0;
+ };
+ 
+ }  // namespace Vulkan
 diff --git a/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp b/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
 index d388300b6e..e6d729ae0c 100644
 --- a/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
