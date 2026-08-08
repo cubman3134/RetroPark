@@ -1,3 +1,210 @@
+diff --git a/Source/Core/DolphinNoGUI/RetroParkDolphin.vcxproj b/Source/Core/DolphinNoGUI/RetroParkDolphin.vcxproj
+new file mode 100644
+index 0000000000..8b6320f07d
+--- /dev/null
++++ b/Source/Core/DolphinNoGUI/RetroParkDolphin.vcxproj
+@@ -0,0 +1,63 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- RetroPark: builds dolphin_present.dll (in-process external-present vehicle). Not upstream Dolphin. -->
++<Project>
++  <Import Project="..\..\VSProps\Base.Macros.props" />
++  <Import Project="$(VSPropsDir)Base.Targets.props" />
++  <PropertyGroup Label="Globals">
++    <ProjectGuid>{A1B2C3D4-1111-4000-8000-DA1F0000FEED}</ProjectGuid>
++  </PropertyGroup>
++  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
++  <Import Project="$(VSPropsDir)Configuration.Base.props" />
++  <PropertyGroup Label="Configuration">
++    <ConfigurationType>DynamicLibrary</ConfigurationType>
++  </PropertyGroup>
++  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
++  <ImportGroup Label="ExtensionSettings" />
++  <ImportGroup Label="PropertySheets">
++    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
++    <Import Project="$(VSPropsDir)Base.props" />
++    <Import Project="$(VSPropsDir)Base.Dolphin.props" />
++    <Import Project="$(VSPropsDir)PCHUse.props" />
++  </ImportGroup>
++  <PropertyGroup Label="UserMacros" />
++  <PropertyGroup>
++    <TargetName>dolphin_present</TargetName>
++  </PropertyGroup>
++  <!-- Base.Dolphin.props gates its link libs on ConfigurationType==Application; this DLL needs the
++       same system + FFmpeg libraries. -->
++  <ItemDefinitionGroup>
++    <Link>
++      <AdditionalLibraryDirectories>$(ExternalsDir)FFmpeg-bin\$(Platform)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
++      <AdditionalDependencies>avrt.lib;comctl32.lib;iphlpapi.lib;ksuser.lib;setupapi.lib;shlwapi.lib;winmm.lib;ws2_32.lib;opengl32.lib;avcodec.lib;avformat.lib;avutil.lib;swresample.lib;swscale.lib;bcrypt.lib;Crypt32.lib;dwmapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
++      <ForceSymbolReferences>enableCompatPatches</ForceSymbolReferences>
++    </Link>
++  </ItemDefinitionGroup>
++  <ItemGroup>
++    <ProjectReference Include="$(CoreDir)DolphinLib.vcxproj">
++      <Project>{D79392F7-06D6-4B4B-A39F-4D587C215D3A}</Project>
++    </ProjectReference>
++    <ProjectReference Include="$(CoreDir)Common\SCMRevGen.vcxproj">
++      <Project>{41279555-f94f-4ebc-99de-af863c10c5c4}</Project>
++    </ProjectReference>
++    <ProjectReference Include="$(DolphinRootDir)Languages\Languages.vcxproj">
++      <Project>{0e033be3-2e08-428e-9ae9-bc673efa12b5}</Project>
++    </ProjectReference>
++  </ItemGroup>
++  <Import Project="$(ExternalsDir)cpp-optparse\exports.props" />
++  <Import Project="$(ExternalsDir)fmt\exports.props" />
++  <Import Project="$(ExternalsDir)glslang\exports.props" />
++  <ItemGroup>
++    <ClCompile Include="rp_dolphin.cpp" />
++  </ItemGroup>
++  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
++  <ImportGroup Label="ExtensionTargets">
++  </ImportGroup>
++  <!-- Copy the .dll to the binary output folder (beside DolphinNoGUI.exe). -->
++  <ItemGroup>
++    <SourceFiles Include="$(TargetPath)" />
++  </ItemGroup>
++  <Target Name="AfterBuild" Inputs="@(SourceFiles)" Outputs="@(SourceFiles -> '$(BinaryOutputDir)%(Filename)%(Extension)')">
++    <Message Text="Copy: @(SourceFiles) -&gt; $(BinaryOutputDir)" Importance="High" />
++    <Copy SourceFiles="@(SourceFiles)" DestinationFolder="$(BinaryOutputDir)" />
++  </Target>
++</Project>
+diff --git a/Source/Core/DolphinNoGUI/rp_dolphin.cpp b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
+new file mode 100644
+index 0000000000..cc55178f38
+--- /dev/null
++++ b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
+@@ -0,0 +1,132 @@
++// RetroPark: dolphin_present.dll — an in-process vehicle that boots Dolphin headless with the
++// external-present path (renders into RetroPark's imported VkImage) and exposes a tiny C API the
++// RetroPark host LoadLibrary's. Not part of upstream Dolphin. (Captured in dolphin-external-present.patch.)
++
++#include <atomic>
++#include <cstdint>
++#include <cstring>
++#include <memory>
++#include <string>
++#include <thread>
++
++#include "Common/MsgHandler.h"
++#include "Common/WindowSystemInfo.h"
++#include "Common/Config/Config.h"
++
++#include "Core/Boot/Boot.h"
++#include "Core/BootManager.h"
++#include "Core/Config/GraphicsSettings.h"
++#include "Core/Config/MainSettings.h"
++#include "Core/Core.h"
++#include "Core/Host.h"
++#include "Core/System.h"
++
++#include "UICommon/UICommon.h"
++
++#include "VideoBackends/Vulkan/VulkanContext.h"
++
++// ---- Host_* callbacks required by DolphinLib (headless no-ops). ----
++std::vector<std::string> Host_GetPreferredLocales() { return {}; }
++void Host_PPCSymbolsChanged() {}
++void Host_PPCBreakpointsChanged() {}
++bool Host_UIBlocksControllerState() { return false; }
++void Host_Message(HostMessageID) {}
++void Host_UpdateTitle(const std::string&) {}
++void Host_UpdateDisasmDialog() {}
++void Host_JitCacheInvalidation() {}
++void Host_JitProfileDataWiped() {}
++void Host_RequestRenderWindowSize(int, int) {}
++bool Host_RendererHasFocus() { return true; }
++bool Host_RendererHasFullFocus() { return true; }
++bool Host_RendererIsFullscreen() { return false; }
++bool Host_TASInputHasFocus() { return false; }
++void Host_YieldToUI() {}
++void Host_TitleChanged() {}
++void Host_UpdateDiscordClientID(const std::string&) {}
++bool Host_UpdateDiscordPresenceRaw(const std::string&, const std::string&, const std::string&,
++                                   const std::string&, const std::string&, const std::string&,
++                                   const int64_t, const int64_t, const int, const int)
++{
++  return false;
++}
++std::unique_ptr<GBAHostInterface> Host_CreateGBAHost(std::weak_ptr<HW::GBA::Core>) { return nullptr; }
++
++// ---- The in-process vehicle. ----
++namespace
++{
++std::thread g_host_thread;
++std::atomic<bool> g_running{false};
++
++void HostThread(std::string rom, std::string user_dir)
++{
++  // No modal dialogs (Dolphin's "Warning" panic would block a headless run).
++  Common::SetEnableAlert(false);
++
++  UICommon::SetUserDirectory(user_dir);
++  UICommon::Init();
++
++  // Force the Vulkan backend (its external-present path renders into RetroPark's image).
++  Config::SetBaseOrCurrent(Config::MAIN_GFX_BACKEND, "Vulkan");
++  // Single-threaded submission: our external-present submit signals the timeline synchronously, which
++  // conflicts with Dolphin's async submit worker (command-buffer reuse). Single-threaded keeps one
++  // consistent submit path with correct fence rotation.
++  Config::SetBaseOrCurrent(Config::GFX_BACKEND_MULTITHREADING, false);
++
++  const WindowSystemInfo wsi(WindowSystemType::Headless, nullptr, nullptr, nullptr);
++  UICommon::InitControllers(wsi);
++
++  auto& system = Core::System::GetInstance();
++  auto boot = BootParameters::GenerateFromFile(
++      rom, BootSessionData(std::nullopt, DeleteSavestateAfterBoot::No));
++  if (boot && BootManager::BootCore(system, std::move(boot), wsi))
++  {
++    while (g_running.load(std::memory_order_acquire))
++    {
++      Core::HostDispatchJobs(system);
++      std::this_thread::sleep_for(std::chrono::milliseconds(2));
++    }
++    Core::Stop(system);
++    Core::Shutdown(system);
++  }
++
++  UICommon::ShutdownControllers();
++  UICommon::Shutdown();
++}
++}  // namespace
++
++extern "C"
++{
++  // Configure external-present + boot the ROM headless on Vulkan. Returns 0 on success.
++  __declspec(dllexport) int rp_dolphin_boot(const uint8_t* device_uuid, void* image_handle,
++                                            void* timeline_handle, uint32_t width, uint32_t height,
++                                            const char* rom_path, const char* user_dir)
++  {
++    if (g_running.load())
++      return 1;
++    auto& ext = Vulkan::GetRetroParkExternalPresent();
++    ext.enabled = true;
++    std::memcpy(ext.device_uuid, device_uuid, 16);
++    ext.image_handle = image_handle;
++    ext.timeline_handle = timeline_handle;
++    ext.width = width;
++    ext.height = height;
++
++    g_running.store(true, std::memory_order_release);
++    g_host_thread = std::thread(HostThread, std::string(rom_path ? rom_path : ""),
++                                std::string(user_dir ? user_dir : ""));
++    return 0;
++  }
++
++  // The most recent timeline value Dolphin signalled (2*frame) — the host waits on this.
++  __declspec(dllexport) uint64_t rp_dolphin_last_signal()
++  {
++    return Vulkan::GetRetroParkLastSignaledValue().load(std::memory_order_acquire);
++  }
++
++  __declspec(dllexport) void rp_dolphin_stop()
++  {
++    g_running.store(false, std::memory_order_release);
++    if (g_host_thread.joinable())
++      g_host_thread.join();
++  }
++}
 diff --git a/Source/Core/VideoBackends/Vulkan/CommandBufferManager.cpp b/Source/Core/VideoBackends/Vulkan/CommandBufferManager.cpp
 index c82417eb8c..cc2b386417 100644
 --- a/Source/Core/VideoBackends/Vulkan/CommandBufferManager.cpp
@@ -193,7 +400,7 @@ index 6338e52e3d..c0453f3658 100644
    {
      PanicAlertFmt("Failed to create Vulkan command buffers");
 diff --git a/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp b/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
-index 370e22d15c..86198378ca 100644
+index 370e22d15c..0296c33db8 100644
 --- a/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
 +++ b/Source/Core/VideoBackends/Vulkan/VKSwapChain.cpp
 @@ -31,9 +31,188 @@ SwapChain::SwapChain(const WindowSystemInfo& wsi, VkSurfaceKHR surface, bool vsy
@@ -385,13 +592,31 @@ index 370e22d15c..86198378ca 100644
  }
  
  VkSurfaceKHR SwapChain::CreateVulkanSurface(VkInstance instance, const WindowSystemInfo& wsi)
-@@ -488,6 +667,14 @@ void SwapChain::DestroySwapChain()
+@@ -488,6 +667,32 @@ void SwapChain::DestroySwapChain()
  
  VkResult SwapChain::AcquireNextImage()
  {
-+  // RetroPark: the external image is always "acquired" (single fixed backbuffer, no vkAcquire).
++  // RetroPark: single fixed external backbuffer. Before rendering frame f (f>0), wait for the host
++  // to have consumed frame f-1 (timeline >= 2f+1), so we don't overwrite an image it's still reading
++  // and the timeline values never regress. Then the image is always "acquired".
 +  if (m_external)
 +  {
++    if (m_ext_frame > 0 && m_ext_timeline != VK_NULL_HANDLE)
++    {
++      VkDevice dev = g_vulkan_context->GetDevice();
++      static PFN_vkWaitSemaphoresKHR pfn_wait = reinterpret_cast<PFN_vkWaitSemaphoresKHR>(
++          vkGetDeviceProcAddr(dev, "vkWaitSemaphoresKHR"));
++      if (pfn_wait)
++      {
++        uint64_t wait_val = 2 * m_ext_frame + 1;
++        VkSemaphoreWaitInfo wi = {};
++        wi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
++        wi.semaphoreCount = 1;
++        wi.pSemaphores = &m_ext_timeline;
++        wi.pValues = &wait_val;
++        pfn_wait(dev, &wi, 1000000000ULL);  // 1s timeout; proceed on timeout to avoid a hard hang
++      }
++    }
 +    m_current_swap_chain_image_index = 0;
 +    m_current_swap_chain_image_is_valid = true;
 +    return VK_SUCCESS;
@@ -400,7 +625,7 @@ index 370e22d15c..86198378ca 100644
    VkResult res = vkAcquireNextImageKHR(g_vulkan_context->GetDevice(), m_swap_chain, UINT64_MAX,
                                         g_command_buffer_mgr->GetCurrentCommandBufferSemaphore(),
                                         VK_NULL_HANDLE, &m_current_swap_chain_image_index);
-@@ -502,6 +689,9 @@ VkResult SwapChain::AcquireNextImage()
+@@ -502,6 +707,9 @@ VkResult SwapChain::AcquireNextImage()
  
  bool SwapChain::ResizeSwapChain()
  {
@@ -410,7 +635,7 @@ index 370e22d15c..86198378ca 100644
    DestroySwapChainImages();
    if (!CreateSwapChain() || !SetupSwapChainImages())
    {
-@@ -514,6 +704,9 @@ bool SwapChain::ResizeSwapChain()
+@@ -514,6 +722,9 @@ bool SwapChain::ResizeSwapChain()
  
  bool SwapChain::RecreateSwapChain()
  {
@@ -420,7 +645,7 @@ index 370e22d15c..86198378ca 100644
    DestroySwapChainImages();
    DestroySwapChain();
    if (!CreateSwapChain() || !SetupSwapChainImages())
-@@ -570,6 +763,9 @@ bool SwapChain::SetFullscreenState(bool state)
+@@ -570,6 +781,9 @@ bool SwapChain::SetFullscreenState(bool state)
  
  bool SwapChain::RecreateSurface(void* native_handle)
  {
@@ -431,7 +656,7 @@ index 370e22d15c..86198378ca 100644
    DestroySwapChainImages();
    DestroySwapChain();
 diff --git a/Source/Core/VideoBackends/Vulkan/VKSwapChain.h b/Source/Core/VideoBackends/Vulkan/VKSwapChain.h
-index 17334dbf97..99f495700a 100644
+index 17334dbf97..da34a113ca 100644
 --- a/Source/Core/VideoBackends/Vulkan/VKSwapChain.h
 +++ b/Source/Core/VideoBackends/Vulkan/VKSwapChain.h
 @@ -17,6 +17,7 @@ class CommandBufferManager;
@@ -442,7 +667,7 @@ index 17334dbf97..99f495700a 100644
  
  class SwapChain
  {
-@@ -31,6 +32,21 @@ public:
+@@ -31,6 +32,23 @@ public:
    static std::unique_ptr<SwapChain> Create(const WindowSystemInfo& wsi, VkSurfaceKHR surface,
                                             bool vsync);
  
@@ -453,10 +678,12 @@ index 17334dbf97..99f495700a 100644
 +  static std::unique_ptr<SwapChain> CreateExternal(const RetroParkExternalPresent& ext);
 +  bool IsExternal() const { return m_external; }
 +  VkSemaphore GetExternalTimeline() const { return m_ext_timeline; }
-+  // Next per-frame timeline value to signal (2*frame), matching the Slice B produce/consume protocol.
++  // Lock-step timeline protocol with the host (single shared image, count=1):
++  //   frame f produces value 2f+2 (strictly increasing, >0); host consumes -> signals 2f+3;
++  //   frame f (f>0) waits for the host's previous consume (2f+1) before rendering.
 +  u64 NextExternalSignalValue()
 +  {
-+    const u64 v = 2 * m_ext_frame;
++    const u64 v = 2 * m_ext_frame + 2;
 +    ++m_ext_frame;
 +    return v;
 +  }
@@ -464,7 +691,7 @@ index 17334dbf97..99f495700a 100644
    VkSurfaceKHR GetSurface() const { return m_surface; }
    VkSurfaceFormatKHR GetSurfaceFormat() const { return m_surface_format; }
    AbstractTextureFormat GetTextureFormat() const { return m_texture_format; }
-@@ -73,6 +89,9 @@ public:
+@@ -73,6 +91,9 @@ public:
    bool SetFullscreenState(bool state);
  
  private:
@@ -474,7 +701,7 @@ index 17334dbf97..99f495700a 100644
    bool SelectSurfaceFormat();
    bool SelectPresentMode();
  
-@@ -109,6 +128,12 @@ private:
+@@ -109,6 +130,12 @@ private:
    u32 m_width = 0;
    u32 m_height = 0;
    u32 m_layers = 0;
