@@ -78,21 +78,27 @@ TEST_CASE("dolphin: renders Billy Hatcher into RetroPark's shared VkImage (gated
     REQUIRE(rp_boot(uuid, descs[0].shared_handle, host.present_sync_handle(), W, H, kRom, kUserDir) == 0);
 
     // Wait for Dolphin to render its first frame (boot takes a few seconds).
+    fprintf(stderr, "[dolphin] booting, waiting for first XFB...\n"); fflush(stderr);
     bool started = false;
-    for (int i = 0; i < 200 && !started; ++i) {
-        if (rp_last() >= 2) started = true;
-        else std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    for (int i = 0; i < 300 && !started; ++i) {
+        uint64_t sig = rp_last();
+        if (sig >= 2) started = true;
+        else { if (i % 20 == 0) { fprintf(stderr, "[dolphin] waiting (last_signal=%llu)\n", (unsigned long long)sig); fflush(stderr); } std::this_thread::sleep_for(std::chrono::milliseconds(100)); }
     }
     if (!started) { rp_stop(); FreeLibrary(dll); WARN("Dolphin did not produce a frame; skipping"); return; }
+    fprintf(stderr, "[dolphin] first frame produced; starting consume loop\n"); fflush(stderr);
 
-    // Lock-step consume: frame f produces 2f+2; composite_and_present waits it, signals 2f+3.
+    // Lock-step consume: producer frame f signals 2f+2; composite_and_present waits it, signals 2f+3.
+    // Retry each frame (must consume in order — the producer waits for our consume before the next).
     std::vector<uint8_t> img(W * H * 4, 0), early, late;
-    for (uint64_t f = 0; f < 800; ++f) {
-        rp_result r = host.composite_and_present(0, 2 * f + 2, true, img.data(), err);
-        if (r != RP_OK) continue;  // transient wait timeout during heavy boot; keep driving
-        if (f % 100 == 0) fprintf(stderr, "[dolphin] consumed frame %llu\n", (unsigned long long)f);
-        if (f == 350) early = img;
-        if (f == 750) late = img;
+    for (uint64_t f = 0; f < 400; ++f) {
+        rp_result r = RP_ERR_TIMEOUT;
+        for (int retry = 0; retry < 5 && r != RP_OK; ++retry)
+            r = host.composite_and_present(0, 2 * f + 2, true, img.data(), err);
+        if (r != RP_OK) { fprintf(stderr, "[dolphin] stalled at frame %llu (r=%d)\n", (unsigned long long)f, (int)r); fflush(stderr); break; }
+        if (f % 50 == 0) { fprintf(stderr, "[dolphin] consumed frame %llu\n", (unsigned long long)f); fflush(stderr); }
+        if (f == 150) early = img;
+        if (f == 380) late = img;
     }
     // Save the composited frame for human confirmation (title screen inside our surface).
     if (!late.empty()) {

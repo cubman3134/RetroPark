@@ -69,13 +69,14 @@ index 0000000000..8b6320f07d
 +</Project>
 diff --git a/Source/Core/DolphinNoGUI/rp_dolphin.cpp b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
 new file mode 100644
-index 0000000000..4813d9a3e7
+index 0000000000..3a275b2065
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
-@@ -0,0 +1,128 @@
-+// RetroPark: dolphin_present.dll — an in-process vehicle that boots Dolphin headless with the
-+// external-present path (renders into RetroPark's imported VkImage) and exposes a tiny C API the
-+// RetroPark host LoadLibrary's. Not part of upstream Dolphin. (Captured in dolphin-external-present.patch.)
+@@ -0,0 +1,412 @@
++// RetroPark: dolphin_present.dll — in-process vehicle. Boots Dolphin NORMAL HEADLESS on Vulkan, and a
++// copy-from-XFB producer hooks after_present_event: each present it blits Dolphin's just-rendered XFB
++// image into the host's imported shared VkImage (own command buffer + QFOT release + timeline signal,
++// the refcore_present_vk producer pattern), lock-stepped to the host consume. Not upstream Dolphin.
 +
 +#include <atomic>
 +#include <cstdint>
@@ -84,6 +85,12 @@ index 0000000000..4813d9a3e7
 +#include <string>
 +#include <thread>
 +
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#include <Windows.h>
++
++#include "Common/HookableEvent.h"
 +#include "Common/MsgHandler.h"
 +#include "Common/WindowSystemInfo.h"
 +#include "Common/Config/Config.h"
@@ -98,7 +105,14 @@ index 0000000000..4813d9a3e7
 +
 +#include "UICommon/UICommon.h"
 +
++#include "VideoCommon/AbstractTexture.h"
++#include "VideoCommon/Present.h"
++#include "VideoCommon/VideoEvents.h"
++
++#include "VideoBackends/Vulkan/VKTexture.h"
 +#include "VideoBackends/Vulkan/VulkanContext.h"
++
++using Vulkan::g_vulkan_context;
 +
 +// ---- Host_* callbacks required by DolphinLib (headless no-ops). ----
 +std::vector<std::string> Host_GetPreferredLocales() { return {}; }
@@ -126,25 +140,288 @@ index 0000000000..4813d9a3e7
 +}
 +std::unique_ptr<GBAHostInterface> Host_CreateGBAHost(std::weak_ptr<HW::GBA::Core>) { return nullptr; }
 +
-+// ---- The in-process vehicle. ----
 +namespace
 +{
++constexpr uint64_t kOneSecondNs = 1000000000ULL;
++
++// The copy-from-XFB producer. Imports the host's shared VkImage + timeline once (lazily, on the first
++// present when g_vulkan_context is up), then blits the XFB into it each present.
++struct XfbProducer
++{
++  bool tried_init = false;
++  bool ok = false;
++  Common::EventHook hook;
++
++  VkDevice dev = VK_NULL_HANDLE;
++  uint32_t qfam = 0;
++  VkQueue queue = VK_NULL_HANDLE;
++
++  VkImage shared_image = VK_NULL_HANDLE;
++  VkDeviceMemory shared_mem = VK_NULL_HANDLE;
++  VkSemaphore timeline = VK_NULL_HANDLE;
++  VkCommandPool pool = VK_NULL_HANDLE;
++  VkCommandBuffer cmd = VK_NULL_HANDLE;
++  VkFence fence = VK_NULL_HANDLE;
++  PFN_vkWaitSemaphoresKHR pfn_wait = nullptr;
++  uint32_t w = 0, h = 0;
++  uint64_t frame = 0;
++
++  bool Init()
++  {
++    const auto& ext = Vulkan::GetRetroParkExternalPresent();
++    dev = g_vulkan_context->GetDevice();
++    VkPhysicalDevice phys = g_vulkan_context->GetPhysicalDevice();
++    qfam = g_vulkan_context->GetGraphicsQueueFamilyIndex();
++    queue = g_vulkan_context->GetGraphicsQueue();
++    w = ext.width;
++    h = ext.height;
++
++    // Import the shared image (VkImageCreateInfo byte-matches the host's exported image).
++    VkExternalMemoryImageCreateInfo emici = {};
++    emici.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
++    emici.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
++    VkImageCreateInfo ici = {};
++    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
++    ici.pNext = &emici;
++    ici.imageType = VK_IMAGE_TYPE_2D;
++    ici.format = VK_FORMAT_R8G8B8A8_UNORM;
++    ici.extent = {w, h, 1};
++    ici.mipLevels = 1;
++    ici.arrayLayers = 1;
++    ici.samples = VK_SAMPLE_COUNT_1_BIT;
++    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
++    ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
++                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
++    ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++    if (vkCreateImage(dev, &ici, nullptr, &shared_image) != VK_SUCCESS)
++      return false;
++
++    VkMemoryRequirements req;
++    vkGetImageMemoryRequirements(dev, shared_image, &req);
++    VkPhysicalDeviceMemoryProperties mp;
++    vkGetPhysicalDeviceMemoryProperties(phys, &mp);
++    uint32_t mem_type = UINT32_MAX;
++    for (uint32_t i = 0; i < mp.memoryTypeCount; i++)
++      if ((req.memoryTypeBits & (1u << i)) &&
++          (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
++      {
++        mem_type = i;
++        break;
++      }
++    if (mem_type == UINT32_MAX)
++      return false;
++
++    VkImportMemoryWin32HandleInfoKHR imp = {};
++    imp.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
++    imp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
++    imp.handle = ext.image_handle;
++    VkMemoryDedicatedAllocateInfo ded = {};
++    ded.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
++    ded.image = shared_image;
++    ded.pNext = &imp;
++    VkMemoryAllocateInfo mai = {};
++    mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
++    mai.pNext = &ded;
++    mai.allocationSize = req.size;
++    mai.memoryTypeIndex = mem_type;
++    if (vkAllocateMemory(dev, &mai, nullptr, &shared_mem) != VK_SUCCESS)
++      return false;
++    if (vkBindImageMemory(dev, shared_image, shared_mem, 0) != VK_SUCCESS)
++      return false;
++
++    // Import the timeline semaphore.
++    VkSemaphoreTypeCreateInfo tci = {};
++    tci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
++    tci.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
++    VkSemaphoreCreateInfo sci = {};
++    sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
++    sci.pNext = &tci;
++    if (vkCreateSemaphore(dev, &sci, nullptr, &timeline) != VK_SUCCESS)
++      return false;
++    auto pfn_import = reinterpret_cast<PFN_vkImportSemaphoreWin32HandleKHR>(
++        vkGetDeviceProcAddr(dev, "vkImportSemaphoreWin32HandleKHR"));
++    pfn_wait = reinterpret_cast<PFN_vkWaitSemaphoresKHR>(vkGetDeviceProcAddr(dev, "vkWaitSemaphoresKHR"));
++    if (!pfn_import || !pfn_wait)
++      return false;
++    VkImportSemaphoreWin32HandleInfoKHR isi = {};
++    isi.sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_WIN32_HANDLE_INFO_KHR;
++    isi.semaphore = timeline;
++    isi.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
++    isi.handle = ext.timeline_handle;
++    if (pfn_import(dev, &isi) != VK_SUCCESS)
++      return false;
++
++    // Own command pool + buffer + fence.
++    VkCommandPoolCreateInfo pci = {};
++    pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
++    pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
++    pci.queueFamilyIndex = qfam;
++    if (vkCreateCommandPool(dev, &pci, nullptr, &pool) != VK_SUCCESS)
++      return false;
++    VkCommandBufferAllocateInfo cbai = {};
++    cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
++    cbai.commandPool = pool;
++    cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
++    cbai.commandBufferCount = 1;
++    if (vkAllocateCommandBuffers(dev, &cbai, &cmd) != VK_SUCCESS)
++      return false;
++    VkFenceCreateInfo fci = {};
++    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
++    if (vkCreateFence(dev, &fci, nullptr, &fence) != VK_SUCCESS)
++      return false;
++    return true;
++  }
++
++  uint64_t call_count = 0;
++  void OnPresent()
++  {
++    ++call_count;
++    if (!tried_init)
++    {
++      tried_init = true;
++      ok = Init();
++      fprintf(stderr, "[rp_producer] OnPresent#1 Init=%d\n", (int)ok);
++      fflush(stderr);
++    }
++    if (!ok)
++      return;
++
++    const AbstractTexture* xfb = g_presenter ? g_presenter->GetCurrentXFBTexture() : nullptr;
++    if (call_count <= 3 || (call_count % 200 == 0))
++    {
++      fprintf(stderr, "[rp_producer] OnPresent#%llu xfb=%p frame=%llu\n",
++              (unsigned long long)call_count, (void*)xfb, (unsigned long long)frame);
++      fflush(stderr);
++    }
++    if (!xfb)
++      return;
++    const auto* vxfb = static_cast<const Vulkan::VKTexture*>(xfb);
++    VkImage src = vxfb->GetImage();
++    VkImageLayout src_layout = vxfb->GetLayout();
++    const uint32_t sw = vxfb->GetWidth(), sh = vxfb->GetHeight();
++
++    // Lock-step: before overwriting the shared image, wait for the host to have consumed the previous
++    // frame (timeline >= 2f+1). Frame 0 does not wait.
++    if (frame > 0)
++    {
++      uint64_t wait_val = 2 * frame + 1;
++      VkSemaphoreWaitInfo swi = {};
++      swi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
++      swi.semaphoreCount = 1;
++      swi.pSemaphores = &timeline;
++      swi.pValues = &wait_val;
++      pfn_wait(dev, &swi, kOneSecondNs);
++    }
++
++    vkResetCommandBuffer(cmd, 0);
++    VkCommandBufferBeginInfo bi = {};
++    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
++    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
++    vkBeginCommandBuffer(cmd, &bi);
++
++    auto barrier = [&](VkImage img, VkImageLayout ol, VkImageLayout nl, uint32_t sq, uint32_t dq,
++                       VkAccessFlags sa, VkAccessFlags da) {
++      VkImageMemoryBarrier b = {};
++      b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
++      b.srcAccessMask = sa;
++      b.dstAccessMask = da;
++      b.oldLayout = ol;
++      b.newLayout = nl;
++      b.srcQueueFamilyIndex = sq;
++      b.dstQueueFamilyIndex = dq;
++      b.image = img;
++      b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
++      vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
++                           0, 0, nullptr, 0, nullptr, 1, &b);
++    };
++
++    // XFB (Dolphin's) -> TRANSFER_SRC; shared (ours) UNDEFINED -> GENERAL (discard prior contents).
++    barrier(src, src_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, qfam, qfam,
++            VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
++    barrier(shared_image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, qfam, qfam, 0,
++            VK_ACCESS_TRANSFER_WRITE_BIT);
++
++    VkImageBlit region = {};
++    region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++    region.srcOffsets[0] = {0, 0, 0};
++    region.srcOffsets[1] = {(int32_t)sw, (int32_t)sh, 1};
++    region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++    region.dstOffsets[0] = {0, 0, 0};
++    region.dstOffsets[1] = {(int32_t)w, (int32_t)h, 1};
++    vkCmdBlitImage(cmd, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, shared_image,
++                   VK_IMAGE_LAYOUT_GENERAL, 1, &region, VK_FILTER_LINEAR);
++
++    // Restore XFB to its original layout (so Dolphin's tracking stays correct); release the shared
++    // image to the external queue family (GENERAL->GENERAL QFOT, Slice B cross-device pattern).
++    barrier(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, src_layout, qfam, qfam,
++            VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_MEMORY_READ_BIT);
++    barrier(shared_image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, qfam,
++            VK_QUEUE_FAMILY_EXTERNAL_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, 0);
++    vkEndCommandBuffer(cmd);
++
++    const uint64_t signal_val = 2 * frame + 2;
++    VkTimelineSemaphoreSubmitInfo tssi = {};
++    tssi.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
++    tssi.signalSemaphoreValueCount = 1;
++    tssi.pSignalSemaphoreValues = &signal_val;
++    VkSubmitInfo si = {};
++    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
++    si.pNext = &tssi;
++    si.commandBufferCount = 1;
++    si.pCommandBuffers = &cmd;
++    si.signalSemaphoreCount = 1;
++    si.pSignalSemaphores = &timeline;
++
++    vkResetFences(dev, 1, &fence);
++    if (vkQueueSubmit(queue, 1, &si, fence) == VK_SUCCESS)
++    {
++      vkWaitForFences(dev, 1, &fence, VK_TRUE, kOneSecondNs);
++      Vulkan::GetRetroParkLastSignaledValue().store(signal_val, std::memory_order_release);
++      ++frame;
++    }
++  }
++};
++
++XfbProducer g_producer;
 +std::thread g_host_thread;
 +std::atomic<bool> g_running{false};
 +
 +void HostThread(std::string rom, std::string user_dir)
 +{
-+  // No modal dialogs (Dolphin's "Warning" panic would block a headless run).
++  // No modal dialogs: a no-op alert handler (returns "proceed") intercepts every panic regardless of
++  // timing, so nothing blocks the run.
 +  Common::SetEnableAlert(false);
-+
++  Common::RegisterMsgAlertHandler(
++      [](const char*, const char*, bool, Common::MsgType) -> bool { return true; });
 +  UICommon::SetUserDirectory(user_dir);
 +  UICommon::Init();
-+
-+  // Force the Vulkan backend (its external-present path renders into RetroPark's image).
 +  Config::SetBaseOrCurrent(Config::MAIN_GFX_BACKEND, "Vulkan");
++  Config::SetBaseOrCurrent(Config::MAIN_USE_PANIC_HANDLERS, false);
++  // Single-threaded submission so our own vkQueueSubmit (in the present hook) never races Dolphin's
++  // submit worker on the same graphics queue.
++  Config::SetBaseOrCurrent(Config::GFX_BACKEND_MULTITHREADING, false);
 +
-+  const WindowSystemInfo wsi(WindowSystemType::Headless, nullptr, nullptr, nullptr);
++  // Create a HIDDEN Win32 window so Dolphin's present path runs (fires after_present_event + populates
++  // the current XFB) — pure headless skips presentation entirely, so the XFB is never available there.
++  // The window is never shown; Dolphin's own swapchain presents to it invisibly, and our producer
++  // copies the XFB into the host's shared image.
++  const auto& ext0 = Vulkan::GetRetroParkExternalPresent();
++  static const wchar_t* kClass = L"RetroParkDolphinHidden";
++  WNDCLASSEXW wc = {};
++  wc.cbSize = sizeof(wc);
++  wc.lpfnWndProc = DefWindowProcW;
++  wc.hInstance = GetModuleHandleW(nullptr);
++  wc.lpszClassName = kClass;
++  RegisterClassExW(&wc);
++  HWND hwnd = CreateWindowExW(0, kClass, L"", WS_OVERLAPPEDWINDOW, 0, 0, (int)ext0.width,
++                              (int)ext0.height, nullptr, nullptr, wc.hInstance, nullptr);
++  const WindowSystemInfo wsi(WindowSystemType::Windows, nullptr, hwnd, hwnd);
 +  UICommon::InitControllers(wsi);
++
++  // Blit the XFB into the host's shared image on every present.
++  g_producer.hook =
++      GetVideoEvents().after_present_event.Register([](const PresentInfo&) { g_producer.OnPresent(); });
 +
 +  auto& system = Core::System::GetInstance();
 +  auto boot = BootParameters::GenerateFromFile(
@@ -153,6 +430,12 @@ index 0000000000..4813d9a3e7
 +  {
 +    while (g_running.load(std::memory_order_acquire))
 +    {
++      MSG msg;
++      while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
++      {
++        TranslateMessage(&msg);
++        DispatchMessageW(&msg);
++      }
 +      Core::HostDispatchJobs(system);
 +      std::this_thread::sleep_for(std::chrono::milliseconds(2));
 +    }
@@ -160,6 +443,9 @@ index 0000000000..4813d9a3e7
 +    Core::Shutdown(system);
 +  }
 +
++  g_producer.hook.reset();
++  if (hwnd)
++    DestroyWindow(hwnd);
 +  UICommon::ShutdownControllers();
 +  UICommon::Shutdown();
 +}
@@ -167,7 +453,6 @@ index 0000000000..4813d9a3e7
 +
 +extern "C"
 +{
-+  // Configure external-present + boot the ROM headless on Vulkan. Returns 0 on success.
 +  __declspec(dllexport) int rp_dolphin_boot(const uint8_t* device_uuid, void* image_handle,
 +                                            void* timeline_handle, uint32_t width, uint32_t height,
 +                                            const char* rom_path, const char* user_dir)
@@ -188,7 +473,6 @@ index 0000000000..4813d9a3e7
 +    return 0;
 +  }
 +
-+  // The most recent timeline value Dolphin signalled (2*frame) — the host waits on this.
 +  __declspec(dllexport) uint64_t rp_dolphin_last_signal()
 +  {
 +    return Vulkan::GetRetroParkLastSignaledValue().load(std::memory_order_acquire);
@@ -365,7 +649,7 @@ index c88e422c98..7296a1732a 100644
    {
      // Transition the backbuffer to PRESENT_SRC to ensure all commands drawing
 diff --git a/Source/Core/VideoBackends/Vulkan/VKMain.cpp b/Source/Core/VideoBackends/Vulkan/VKMain.cpp
-index 6338e52e3d..c0453f3658 100644
+index 6338e52e3d..9ec2553cb6 100644
 --- a/Source/Core/VideoBackends/Vulkan/VKMain.cpp
 +++ b/Source/Core/VideoBackends/Vulkan/VKMain.cpp
 @@ -165,6 +165,20 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
@@ -389,28 +673,16 @@ index 6338e52e3d..c0453f3658 100644
    // Now we can create the Vulkan device. VulkanContext takes ownership of the instance and surface.
    g_vulkan_context =
        VulkanContext::Create(instance, gpu_list[selected_adapter_index], surface, enable_debug_utils,
-@@ -198,7 +212,19 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
+@@ -197,6 +211,8 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
+   }
  
    // Create swap chain. This has to be done early so that the target size is correct for auto-scale.
++  // RetroPark: in external-present mode Dolphin runs NORMAL HEADLESS (no swapchain); the copy-from-XFB
++  // producer (rp_dolphin.cpp) hooks after_present_event and blits the XFB into the host's shared image.
    std::unique_ptr<SwapChain> swap_chain;
--  if (surface != VK_NULL_HANDLE)
-+  if (rp_external.enabled)
-+  {
-+    // RetroPark: render into the host's imported external VkImage instead of a real swapchain.
-+    // IsHeadless() stays false (swap_chain non-null) so the present path runs.
-+    swap_chain = SwapChain::CreateExternal(rp_external);
-+    if (!swap_chain)
-+    {
-+      ERROR_LOG_FMT(VIDEO, "RetroPark: failed to create external present target.");
-+      Shutdown();
-+      return false;
-+    }
-+  }
-+  else if (surface != VK_NULL_HANDLE)
+   if (surface != VK_NULL_HANDLE)
    {
-     swap_chain = SwapChain::Create(wsi, surface, g_ActiveConfig.bVSyncActive);
-     if (!swap_chain)
-@@ -211,8 +237,7 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
+@@ -211,8 +227,7 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
  
    // Create command buffers. We do this separately because the other classes depend on it.
    g_command_buffer_mgr = std::make_unique<CommandBufferManager>(g_Config.bBackendMultithreading);
@@ -883,3 +1155,22 @@ index f59c7421f4..41b5cdca41 100644
  };
  
  extern std::unique_ptr<VulkanContext> g_vulkan_context;
+diff --git a/Source/Core/VideoCommon/Present.h b/Source/Core/VideoCommon/Present.h
+index 91ba870967..8405f68a07 100644
+--- a/Source/Core/VideoCommon/Present.h
++++ b/Source/Core/VideoCommon/Present.h
+@@ -109,6 +109,14 @@ public:
+ 
+   const MathUtil::Rectangle<int>& GetTargetRectangle() const { return m_target_rectangle; }
+ 
++  // RetroPark: the current XFB (just-rendered frame) texture + its source rect, for the
++  // copy-from-XFB producer (blits this into the host's shared VkImage each present).
++  const AbstractTexture* GetCurrentXFBTexture() const
++  {
++    return m_xfb_entry ? m_xfb_entry->texture.get() : nullptr;
++  }
++  const MathUtil::Rectangle<int>& GetCurrentXFBRect() const { return m_xfb_rect; }
++
+ private:
+   // Fetches the XFB texture from the texture cache.
+   // Returns true the contents have changed since last time
