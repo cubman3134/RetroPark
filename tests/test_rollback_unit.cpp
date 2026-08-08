@@ -65,3 +65,35 @@ TEST_CASE("core: refcore_rollback state depends on input (deterministic)") {
     CHECK(run(false) == 10u);        // +1 per frame
     CHECK(run(true)  == 20u);        // +2 per frame while X held
 }
+
+#include "net/RollbackPredict.h"
+using namespace rp::net;
+
+TEST_CASE("rollback: rb_predict repeats last confirmed, else neutral") {
+    std::map<uint64_t, rp_input_state> remote;
+    rp_input_state neutral = rb_predict(remote, 0);
+    CHECK(neutral.pad_buttons == 0);                 // nothing confirmed -> neutral
+    rp_input_state a{}; a.keys['X'] = 1; remote[5] = a;
+    rp_input_state p = rb_predict(remote, 5);
+    CHECK(p.keys['X'] == 1);                          // repeats frame 5's input
+}
+
+TEST_CASE("rollback: rb_first_mispredicted finds earliest confirmed divergence") {
+    std::map<uint64_t, rp_input_state> real, used;
+    for (uint64_t f = 0; f <= 5; ++f) { real[f] = {}; used[f] = {}; }
+    // frame 3 diverges: real held X, we predicted neutral
+    real[3].keys['X'] = 1;
+    CHECK(rb_first_mispredicted(real, used, 0, 5) == 3u);
+    CHECK(rb_first_mispredicted(real, used, 4, 5) == UINT64_MAX);   // divergence is before the window
+    // all-match -> none
+    real[3].keys['X'] = 0;
+    CHECK(rb_first_mispredicted(real, used, 0, 5) == UINT64_MAX);
+    CHECK(rb_first_mispredicted(real, used, 5, 0) == UINT64_MAX);   // empty range
+}
+
+TEST_CASE("rollback: rb_prune_below drops old frames") {
+    std::map<uint64_t, int> m{{1,1},{2,2},{5,5},{9,9}};
+    rb_prune_below(m, 5);
+    CHECK(m.count(1) == 0); CHECK(m.count(2) == 0);
+    CHECK(m.count(5) == 1); CHECK(m.count(9) == 1);
+}
