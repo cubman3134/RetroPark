@@ -11,7 +11,10 @@ namespace rp {
 rp_result Win32CoreModule::open(const std::string& path,
                                 std::unique_ptr<Win32CoreModule>& out, std::string& error) {
 #if defined(_WIN32)
-    HMODULE h = ::LoadLibraryA(path.c_str());
+    // LOAD_WITH_ALTERED_SEARCH_PATH: search the core DLL's own directory for its dependencies (a
+    // heavy core like dolphin_present ships sibling DLLs — SDL3, FFmpeg, etc.). Dependency-free
+    // cores (the refcores) are unaffected.
+    HMODULE h = ::LoadLibraryExA(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
     if (!h) { error = "LoadLibrary failed for " + path; return RP_ERR_NOT_FOUND; }
     out.reset(new Win32CoreModule(reinterpret_cast<void*>(h)));
     return RP_OK;

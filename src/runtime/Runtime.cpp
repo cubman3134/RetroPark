@@ -164,15 +164,21 @@ rp_result Runtime::load_core(const std::string& core_dir) {
         return RP_OK;
     }
 
+    // Presenting core. A presenting core that takes content (e.g. dolphin_present) must be started
+    // AFTER load_content, so defer start until then; a content-free presenting core starts now.
+    requires_content_ = loader_.has_load_content();
+    content_loaded_ = false;
     rp_result r = rebuild_surfaces(err);
     if (r != RP_OK) {
         unload_core();
         return r;
     }
-    r = loader_.start(err);
-    if (r != RP_OK) {
-        unload_core();
-        return r;
+    if (!requires_content_) {
+        r = loader_.start(err);
+        if (r != RP_OK) {
+            unload_core();
+            return r;
+        }
     }
     return RP_OK;
 }
@@ -195,8 +201,22 @@ rp_result Runtime::unload_core() {
 }
 
 rp_result Runtime::load_content(const char* path) {
-    if (!core_loaded_ || core_type_ != RP_CORE_DRIVEN) return RP_ERR_INTERNAL;
+    if (!core_loaded_) return RP_ERR_INTERNAL;
     std::string err;
+    if (core_type_ == RP_CORE_PRESENTING) {
+        // A presenting content core (e.g. dolphin_present): hand it the content, then start it —
+        // load_core deferred start precisely so start() sees the ISO. Surfaces were already set.
+        if (!requires_content_) return RP_ERR_INTERNAL; // content-free presenting core takes no content
+        rp_result r = loader_.load_content(path ? path : "", err);
+        if (r != RP_OK) return r;
+        content_loaded_ = true;
+        if (loader_.state() != LoaderState::Started) {
+            r = loader_.start(err);
+            if (r != RP_OK) return r;
+        }
+        return RP_OK;
+    }
+    if (core_type_ != RP_CORE_DRIVEN) return RP_ERR_INTERNAL;
     rp_result r = loader_.load_content(path ? path : "", err);
     if (r != RP_OK) return r;
     rp_av_info av{};

@@ -1,9 +1,9 @@
 diff --git a/Source/Core/DolphinNoGUI/RetroParkDolphin.vcxproj b/Source/Core/DolphinNoGUI/RetroParkDolphin.vcxproj
 new file mode 100644
-index 0000000000..3bd3ba8fd2
+index 0000000000..ee309235fb
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/RetroParkDolphin.vcxproj
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,70 @@
 +<?xml version="1.0" encoding="utf-8"?>
 +<!-- RetroPark: builds dolphin_present.dll (in-process external-present vehicle). Not upstream Dolphin. -->
 +<Project>
@@ -70,6 +70,8 @@ index 0000000000..3bd3ba8fd2
 +  <Target Name="AfterBuild" Inputs="@(SourceFiles)" Outputs="@(SourceFiles -> '$(BinaryOutputDir)%(Filename)%(Extension)')">
 +    <Message Text="Copy: @(SourceFiles) -&gt; $(BinaryOutputDir)" Importance="High" />
 +    <Copy SourceFiles="@(SourceFiles)" DestinationFolder="$(BinaryOutputDir)" />
++    <!-- Make BinaryOutputDir a valid rp_core directory: core.json beside the DLL + its deps. -->
++    <Copy SourceFiles="C:\Users\cubma\source\repos\RetroPark\cores\dolphin_present\core.json" DestinationFolder="$(BinaryOutputDir)" />
 +  </Target>
 +</Project>
 diff --git a/Source/Core/DolphinNoGUI/rp_dolphin.cpp b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
