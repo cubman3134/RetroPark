@@ -1,0 +1,156 @@
+diff --git a/Source/Core/VideoBackends/Vulkan/VKMain.cpp b/Source/Core/VideoBackends/Vulkan/VKMain.cpp
+index 6338e52e3d..766f4ddc16 100644
+--- a/Source/Core/VideoBackends/Vulkan/VKMain.cpp
++++ b/Source/Core/VideoBackends/Vulkan/VKMain.cpp
+@@ -165,6 +165,20 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
+     selected_adapter_index = 0;
+   }
+ 
++  // RetroPark: when rendering into an external (host-provided) image, the device MUST match the
++  // host's physical device by UUID, or the imported memory is on the wrong adapter.
++  const auto& rp_external = GetRetroParkExternalPresent();
++  if (rp_external.enabled)
++  {
++    int uuid_index = VulkanContext::FindDeviceIndexByUUID(gpu_list, rp_external.device_uuid);
++    if (uuid_index < 0)
++    {
++      ERROR_LOG_FMT(VIDEO, "RetroPark: no Vulkan device matching host UUID; cannot external-present.");
++      return false;
++    }
++    selected_adapter_index = static_cast<size_t>(uuid_index);
++  }
++
+   // Now we can create the Vulkan device. VulkanContext takes ownership of the instance and surface.
+   g_vulkan_context =
+       VulkanContext::Create(instance, gpu_list[selected_adapter_index], surface, enable_debug_utils,
+diff --git a/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp b/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
+index d388300b6e..e6d729ae0c 100644
+--- a/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
++++ b/Source/Core/VideoBackends/Vulkan/VulkanContext.cpp
+@@ -661,6 +661,16 @@ bool VulkanContext::SelectDeviceExtensions(bool enable_surface)
+   AddExtension(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME, false);
+   AddExtension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME, false);
+ 
++  // RetroPark: external-memory/semaphore + timeline extensions, so Dolphin can render into an
++  // externally-provided (imported) VkImage and signal an imported timeline semaphore instead of
++  // presenting to its own swapchain. All of these must be present for external-present mode.
++  m_external_present_supported =
++      AddExtension(VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME, false) &
++      AddExtension(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME, false) &
++      AddExtension(VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME, false) &
++      AddExtension(VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME, false) &
++      AddExtension(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME, false);
++
+   if (!DriverDetails::HasBug(DriverDetails::BUG_BROKEN_DEPTH_CLAMP_CONTROL))
+   {
+     // Unrestricted depth range is one of the few extensions that changes the behavior
+@@ -685,8 +695,41 @@ void VulkanContext::WarnMissingDeviceFeatures()
+   }
+ }
+ 
++// RetroPark: process-global external-present configuration, set by the in-process host before boot.
++RetroParkExternalPresent& GetRetroParkExternalPresent()
++{
++  static RetroParkExternalPresent s_external_present;
++  return s_external_present;
++}
++
++// RetroPark: query a physical device's UUID (VkPhysicalDeviceIDProperties via properties2).
++static void QueryPhysicalDeviceUUID(VkPhysicalDevice device, u8 out_uuid[VK_UUID_SIZE])
++{
++  VkPhysicalDeviceIDProperties id_props = {};
++  id_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
++  VkPhysicalDeviceProperties2 props2 = {};
++  props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
++  props2.pNext = &id_props;
++  vkGetPhysicalDeviceProperties2(device, &props2);
++  std::memcpy(out_uuid, id_props.deviceUUID, VK_UUID_SIZE);
++}
++
++int VulkanContext::FindDeviceIndexByUUID(const GPUList& gpu_list, const u8 uuid[VK_UUID_SIZE])
++{
++  for (size_t i = 0; i < gpu_list.size(); i++)
++  {
++    u8 dev_uuid[VK_UUID_SIZE];
++    QueryPhysicalDeviceUUID(gpu_list[i], dev_uuid);
++    if (std::memcmp(dev_uuid, uuid, VK_UUID_SIZE) == 0)
++      return static_cast<int>(i);
++  }
++  return -1;
++}
++
+ bool VulkanContext::CreateDevice(VkSurfaceKHR surface, bool enable_validation_layer)
+ {
++  QueryPhysicalDeviceUUID(m_physical_device, m_device_uuid);
++
+   u32 queue_family_count;
+   vkGetPhysicalDeviceQueueFamilyProperties(m_physical_device, &queue_family_count, nullptr);
+   if (queue_family_count == 0)
+@@ -803,6 +846,17 @@ bool VulkanContext::CreateDevice(VkSurfaceKHR surface, bool enable_validation_la
+   VkPhysicalDeviceFeatures device_features = m_device_info.features();
+   device_info.pEnabledFeatures = &device_features;
+ 
++  // RetroPark: enable the timeline-semaphore feature when external-present extensions are present,
++  // so the imported timeline semaphore is usable (the extension alone does not enable the feature).
++  VkPhysicalDeviceTimelineSemaphoreFeatures timeline_features = {};
++  timeline_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
++  if (m_external_present_supported)
++  {
++    timeline_features.timelineSemaphore = VK_TRUE;
++    timeline_features.pNext = const_cast<void*>(device_info.pNext);
++    device_info.pNext = &timeline_features;
++  }
++
+   // Enable debug layer on debug builds
+   if (enable_validation_layer)
+   {
+diff --git a/Source/Core/VideoBackends/Vulkan/VulkanContext.h b/Source/Core/VideoBackends/Vulkan/VulkanContext.h
+index f59c7421f4..d2828f632a 100644
+--- a/Source/Core/VideoBackends/Vulkan/VulkanContext.h
++++ b/Source/Core/VideoBackends/Vulkan/VulkanContext.h
+@@ -15,6 +15,21 @@
+ 
+ namespace Vulkan
+ {
++// RetroPark: when enabled, Dolphin's Vulkan backend selects the physical device matching device_uuid,
++// imports the external VkImage (image_handle) + timeline semaphore (timeline_handle) instead of
++// creating its own swapchain, and renders its final frame into that image, signalling the timeline.
++// Set by the in-process host BEFORE Dolphin boots. A process-global (one Dolphin instance per process).
++struct RetroParkExternalPresent
++{
++  bool enabled = false;
++  u8 device_uuid[VK_UUID_SIZE] = {};
++  void* image_handle = nullptr;     // OPAQUE_WIN32 memory handle (host-owned; do not close)
++  void* timeline_handle = nullptr;  // OPAQUE_WIN32 timeline-semaphore handle (host-owned)
++  u32 width = 0;
++  u32 height = 0;
++};
++RetroParkExternalPresent& GetRetroParkExternalPresent();
++
+ class VulkanContext
+ {
+ public:
+@@ -120,6 +135,12 @@ public:
+   // Returns true if the specified extension is supported and enabled.
+   bool SupportsDeviceExtension(const char* name) const;
+ 
++  // RetroPark: external-present (import an external VkImage + timeline semaphore) support + the
++  // chosen physical device's UUID, and a helper to pick a device by a target UUID.
++  bool IsExternalPresentSupported() const { return m_external_present_supported; }
++  const u8* GetDeviceUUID() const { return m_device_uuid; }
++  static int FindDeviceIndexByUUID(const GPUList& gpu_list, const u8 uuid[VK_UUID_SIZE]);
++
+   // Returns true if exclusive fullscreen is supported for the given surface.
+   bool SupportsExclusiveFullscreen(const WindowSystemInfo& wsi, VkSurfaceKHR surface);
+ 
+@@ -157,6 +178,10 @@ private:
+   PhysicalDeviceInfo m_device_info;
+ 
+   std::vector<std::string> m_device_extensions;
++
++  // RetroPark external-present state.
++  bool m_external_present_supported = false;
++  u8 m_device_uuid[VK_UUID_SIZE] = {};
+ };
+ 
+ extern std::unique_ptr<VulkanContext> g_vulkan_context;
