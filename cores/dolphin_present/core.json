@@ -1,0 +1,9 @@
+{
+  "id": "dolphin_present",
+  "name": "Dolphin (GameCube/Wii) Presenting Core",
+  "type": "presenting",
+  "abi_version": 5,
+  "graphics_api": "vulkan",
+  "entry": "dolphin_present.dll",
+  "requires_content": true
+}

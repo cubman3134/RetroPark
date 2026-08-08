@@ -1,9 +1,9 @@
 diff --git a/Source/Core/DolphinNoGUI/RetroParkDolphin.vcxproj b/Source/Core/DolphinNoGUI/RetroParkDolphin.vcxproj
 new file mode 100644
-index 0000000000..8b6320f07d
+index 0000000000..3bd3ba8fd2
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/RetroParkDolphin.vcxproj
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,68 @@
 +<?xml version="1.0" encoding="utf-8"?>
 +<!-- RetroPark: builds dolphin_present.dll (in-process external-present vehicle). Not upstream Dolphin. -->
 +<Project>
@@ -32,6 +32,11 @@ index 0000000000..8b6320f07d
 +  <!-- Base.Dolphin.props gates its link libs on ConfigurationType==Application; this DLL needs the
 +       same system + FFmpeg libraries. -->
 +  <ItemDefinitionGroup>
++    <ClCompile>
++      <!-- RetroPark's C ABI header (rp_core_abi/rp_host_iface/rp_surface_set) so rp_dolphin.cpp can be
++           a loadable presenting core. -->
++      <AdditionalIncludeDirectories>C:\Users\cubma\source\repos\RetroPark\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
++    </ClCompile>
 +    <Link>
 +      <AdditionalLibraryDirectories>$(ExternalsDir)FFmpeg-bin\$(Platform)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
 +      <AdditionalDependencies>avrt.lib;comctl32.lib;iphlpapi.lib;ksuser.lib;setupapi.lib;shlwapi.lib;winmm.lib;ws2_32.lib;opengl32.lib;avcodec.lib;avformat.lib;avutil.lib;swresample.lib;swscale.lib;bcrypt.lib;Crypt32.lib;dwmapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
@@ -69,10 +74,10 @@ index 0000000000..8b6320f07d
 +</Project>
 diff --git a/Source/Core/DolphinNoGUI/rp_dolphin.cpp b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
 new file mode 100644
-index 0000000000..e4622a1efa
+index 0000000000..a10f89d021
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
-@@ -0,0 +1,405 @@
+@@ -0,0 +1,492 @@
 +// RetroPark: dolphin_present.dll — in-process vehicle. Boots Dolphin NORMAL HEADLESS on Vulkan, and a
 +// copy-from-XFB producer hooks after_present_event: each present it blits Dolphin's just-rendered XFB
 +// image into the host's imported shared VkImage (own command buffer + QFOT release + timeline signal,
@@ -111,6 +116,8 @@ index 0000000000..e4622a1efa
 +
 +#include "VideoBackends/Vulkan/VKTexture.h"
 +#include "VideoBackends/Vulkan/VulkanContext.h"
++
++#include "retropark/retropark_abi.h"  // RetroPark C ABI: rp_core_abi / rp_host_iface / rp_surface_set
 +
 +using Vulkan::g_vulkan_context;
 +
@@ -165,6 +172,10 @@ index 0000000000..e4622a1efa
 +  PFN_vkWaitSemaphoresKHR pfn_wait = nullptr;
 +  uint32_t w = 0, h = 0;
 +  uint64_t frame = 0;
++
++  // Set when driven as an rp_core (Slice K): report each frame to the Runtime's SurfaceRing.
++  rp_host_iface rp_host{};
++  uint64_t rp_generation = 0;
 +
 +  bool Init()
 +  {
@@ -368,6 +379,8 @@ index 0000000000..e4622a1efa
 +    {
 +      vkWaitForFences(dev, 1, &fence, VK_TRUE, kOneSecondNs);
 +      Vulkan::GetRetroParkLastSignaledValue().store(signal_val, std::memory_order_release);
++      if (rp_host.submit_frame)
++        rp_host.submit_frame(rp_host.host, 0, rp_generation, signal_val);
 +      ++frame;
 +    }
 +  }
@@ -442,16 +455,34 @@ index 0000000000..e4622a1efa
 +  UICommon::ShutdownControllers();
 +  UICommon::Shutdown();
 +}
++
++// Spawn the Dolphin host thread for `rom` (surfaces come from RetroParkExternalPresent, set by the
++// caller). Returns false if already running.
++bool BootDolphinThread(std::string rom)
++{
++  if (g_running.load())
++    return false;
++  g_running.store(true, std::memory_order_release);
++  g_host_thread = std::thread(HostThread, std::move(rom), std::string());
++  return true;
++}
++
++void StopDolphinThread()
++{
++  g_running.store(false, std::memory_order_release);
++  if (g_host_thread.joinable())
++    g_host_thread.join();
++}
 +}  // namespace
 +
++// ---- Slice J direct-handoff C API (used by the standalone test). ----
 +extern "C"
 +{
 +  __declspec(dllexport) int rp_dolphin_boot(const uint8_t* device_uuid, void* image_handle,
 +                                            void* timeline_handle, uint32_t width, uint32_t height,
 +                                            const char* rom_path, const char* user_dir)
 +  {
-+    if (g_running.load())
-+      return 1;
++    (void)user_dir;
 +    auto& ext = Vulkan::GetRetroParkExternalPresent();
 +    ext.enabled = true;
 +    std::memcpy(ext.device_uuid, device_uuid, 16);
@@ -459,11 +490,8 @@ index 0000000000..e4622a1efa
 +    ext.timeline_handle = timeline_handle;
 +    ext.width = width;
 +    ext.height = height;
-+
-+    g_running.store(true, std::memory_order_release);
-+    g_host_thread = std::thread(HostThread, std::string(rom_path ? rom_path : ""),
-+                                std::string(user_dir ? user_dir : ""));
-+    return 0;
++    g_producer.rp_host = rp_host_iface{};  // C-API mode: report via the global, not submit_frame
++    return BootDolphinThread(std::string(rom_path ? rom_path : "")) ? 0 : 1;
 +  }
 +
 +  __declspec(dllexport) uint64_t rp_dolphin_last_signal()
@@ -471,13 +499,77 @@ index 0000000000..e4622a1efa
 +    return Vulkan::GetRetroParkLastSignaledValue().load(std::memory_order_acquire);
 +  }
 +
-+  __declspec(dllexport) void rp_dolphin_stop()
-+  {
-+    g_running.store(false, std::memory_order_release);
-+    if (g_host_thread.joinable())
-+      g_host_thread.join();
-+  }
++  __declspec(dllexport) void rp_dolphin_stop() { StopDolphinThread(); }
 +}
++
++// ---- Slice K: dolphin_present as a loadable RetroPark presenting core (rp_core_abi). ----
++namespace
++{
++struct DolphinCore
++{
++  rp_host_iface host{};
++  std::string rom;
++};
++
++void dp_get_info(rp_core_info* out)
++{
++  out->abi_version = RETROPARK_ABI_VERSION;
++  out->type = RP_CORE_PRESENTING;
++  out->graphics_api = RP_GFX_VULKAN;
++  out->id = "dolphin_present";
++}
++rp_core* dp_create(const rp_host_iface* host)
++{
++  auto* c = new DolphinCore();
++  c->host = *host;
++  return reinterpret_cast<rp_core*>(c);
++}
++void dp_destroy(rp_core* core)
++{
++  StopDolphinThread();
++  delete reinterpret_cast<DolphinCore*>(core);
++}
++rp_result dp_load_content(rp_core* core, const char* path)
++{
++  reinterpret_cast<DolphinCore*>(core)->rom = path ? path : "";
++  return RP_OK;
++}
++rp_result dp_set_surfaces(rp_core* core, const rp_surface_set* set)
++{
++  if (!set || set->count < 1)
++    return RP_ERR_BAD_ARG;
++  auto* c = reinterpret_cast<DolphinCore*>(core);
++  auto& ext = Vulkan::GetRetroParkExternalPresent();
++  ext.enabled = true;
++  std::memcpy(ext.device_uuid, set->device_uuid, 16);
++  ext.image_handle = set->surfaces[0].shared_handle;
++  ext.timeline_handle = set->sync_handle;
++  ext.width = set->surfaces[0].width;
++  ext.height = set->surfaces[0].height;
++  g_producer.rp_host = c->host;  // rp_core mode: report each frame via submit_frame
++  g_producer.rp_generation = set->surfaces[0].generation;
++  return RP_OK;
++}
++rp_result dp_start(rp_core* core)
++{
++  auto* c = reinterpret_cast<DolphinCore*>(core);
++  if (c->rom.empty())
++    return RP_ERR_INTERNAL;
++  return BootDolphinThread(c->rom) ? RP_OK : RP_ERR_DEVICE;
++}
++rp_result dp_stop(rp_core*)
++{
++  StopDolphinThread();
++  return RP_OK;
++}
++
++const rp_core_abi kAbi = {
++    RETROPARK_ABI_VERSION, dp_get_info,    dp_create,   dp_destroy, dp_set_surfaces,
++    dp_start,              dp_stop,        nullptr,     nullptr,    nullptr,
++    nullptr,               nullptr,        dp_load_content};
++}  // namespace
++
++extern "C" __declspec(dllexport) const rp_core_abi* rp_get_core_abi(void) { return &kAbi; }
 diff --git a/Source/Core/VideoBackends/Vulkan/CommandBufferManager.cpp b/Source/Core/VideoBackends/Vulkan/CommandBufferManager.cpp
 index c82417eb8c..083b4c1d1a 100644
 --- a/Source/Core/VideoBackends/Vulkan/CommandBufferManager.cpp
