@@ -3,6 +3,7 @@
 #include <shellapi.h>
 #include <retropark/retropark.h>
 #include "net/NetSession.h"
+#include "net/RollbackSession.h"
 #include "net/TcpTransport.h"
 #include "net/Crc32.h"
 #include "runtime/Runtime.h"
@@ -112,6 +113,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     // Netplay (manual 2-machine demo): --netplay-host <port> or --netplay-join <ip:port>.
     bool netplay_host_flag = false;
     bool netplay_join_flag = false;
+    bool rollback_flag = false;
     std::string netplay_ip;
     uint16_t netplay_port = 0;
     {
@@ -139,6 +141,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
                         netplay_ip = spec.substr(0, colon);
                         netplay_port = static_cast<uint16_t>(std::atoi(spec.substr(colon + 1).c_str()));
                     }
+                } else if (a == L"--rollback") {
+                    rollback_flag = true;
                 }
             }
             LocalFree(argv);
@@ -188,10 +192,18 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     // --netplay-join <ip:port> connects to a host already waiting. content_hash is the ROM's
     // crc32 (0 for a contentless core) so a mismatched ROM/core between the two machines is
     // rejected at the handshake rather than silently desyncing later.
+    // --rollback (only meaningful alongside --netplay-host/--netplay-join) swaps the Slice G
+    // lockstep NetSession for a predictive RollbackSession: locally simulates ahead of the
+    // confirmed remote frame instead of blocking on it, and resimulates+rolls back when a
+    // prediction turns out wrong.
     std::unique_ptr<rp::net::TcpTransport> netplay_transport;
     rp::net::NetSession netplay_session;
+    rp::net::RollbackSession rb_session;
     bool netplay = false;
     uint64_t content_hash = 0;
+    const uint32_t out_w = use_content ? 256 : 640;
+    const uint32_t out_h = use_content ? 240 : 480;
+    std::vector<uint8_t> rb_out(static_cast<size_t>(out_w) * out_h * 4);
     if (use_content) {
         std::ifstream rom_f(content_path, std::ios::binary);
         if (rom_f) {
@@ -206,12 +218,20 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
             fprintf(stderr, "netplay host failed: %s\n", err.c_str());
             return 1;
         }
-        if (netplay_session.start_host(rt_cpp, *netplay_transport, /*delay=*/2, content_hash, core_id, err) != RP_OK) {
-            fprintf(stderr, "host handshake failed: %s\n", err.c_str());
-            return 1;
+        if (rollback_flag) {
+            if (rb_session.start_host(rt_cpp, *netplay_transport, /*max_pred=*/8, content_hash, core_id, err) != RP_OK) {
+                fprintf(stderr, "rollback host handshake failed: %s\n", err.c_str());
+                return 1;
+            }
+            printf("netplay: hosting (rollback) on port %u, you are Player 1 (port 0)\n", netplay_port);
+        } else {
+            if (netplay_session.start_host(rt_cpp, *netplay_transport, /*delay=*/2, content_hash, core_id, err) != RP_OK) {
+                fprintf(stderr, "host handshake failed: %s\n", err.c_str());
+                return 1;
+            }
+            printf("netplay: hosting on port %u, you are Player 1 (port 0)\n", netplay_port);
         }
         netplay = true;
-        printf("netplay: hosting on port %u, you are Player 1 (port 0)\n", netplay_port);
         fflush(stdout);
     } else if (netplay_join_flag) {
         std::string err;
@@ -220,12 +240,20 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
             fprintf(stderr, "netplay join failed: %s\n", err.c_str());
             return 1;
         }
-        if (netplay_session.start_join(rt_cpp, *netplay_transport, content_hash, core_id, err) != RP_OK) {
-            fprintf(stderr, "join handshake failed: %s\n", err.c_str());
-            return 1;
+        if (rollback_flag) {
+            if (rb_session.start_join(rt_cpp, *netplay_transport, content_hash, core_id, err) != RP_OK) {
+                fprintf(stderr, "rollback join handshake failed: %s\n", err.c_str());
+                return 1;
+            }
+            printf("netplay: joined %s:%u (rollback), you are Player 2 (port 1)\n", netplay_ip.c_str(), netplay_port);
+        } else {
+            if (netplay_session.start_join(rt_cpp, *netplay_transport, content_hash, core_id, err) != RP_OK) {
+                fprintf(stderr, "join handshake failed: %s\n", err.c_str());
+                return 1;
+            }
+            printf("netplay: joined %s:%u, you are Player 2 (port 1)\n", netplay_ip.c_str(), netplay_port);
         }
         netplay = true;
-        printf("netplay: joined %s:%u, you are Player 2 (port 1)\n", netplay_ip.c_str(), netplay_port);
         fflush(stdout);
     }
 
@@ -236,7 +264,26 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
             if (msg.message == WM_QUIT) { running = false; break; }
             TranslateMessage(&msg); DispatchMessage(&msg);
         }
-        if (netplay) {
+        if (netplay && rollback_flag) {
+            rp_input_state local = read_local_input();
+            // tick() advances + renders into rb_out via rp_runtime_render, which composites to
+            // this same windowed runtime's swapchain internally (same path rp_runtime_present
+            // uses) -- so rb_out itself is only needed as the required out_rgba destination;
+            // there is nothing further to blit here. Stalled is normal (waiting on the peer to
+            // catch up within max_prediction) -- the frame was already re-rendered, so just
+            // loop around; only Desync/Disconnected halt the demo.
+            rp::net::RbStatus st = rb_session.tick(local, rb_out.data());
+            if (st == rp::net::RbStatus::Desync) {
+                printf("DESYNC at frame %llu -- halting rollback netplay\n", (unsigned long long)rb_session.frame());
+                fflush(stdout);
+                break;
+            }
+            if (st == rp::net::RbStatus::Disconnected) {
+                printf("peer disconnected -- halting rollback netplay\n");
+                fflush(stdout);
+                break;
+            }
+        } else if (netplay) {
             rp_input_state local = read_local_input();
             // Sends local, waits for the remote frame, advances the core with both, and
             // presents -- rp_runtime_present() runs INSIDE tick() against this same windowed
