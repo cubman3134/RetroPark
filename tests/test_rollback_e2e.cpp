@@ -62,20 +62,25 @@ private:
 
 TEST_CASE("rollback: mispredictions roll back and converge to lockstep ground truth (portable)") {
     const int N = 120;
+    const int kFlush = 20;
     // Fixed 2-port input plan (port0 = host/A, port1 = join/B); both known for all frames.
     auto A = [](int f){ rp_input_state s{}; s.keys['X'] = (f % 4 == 0); return s; };
     auto B = [](int f){ rp_input_state s{}; s.keys['X'] = (f % 3 == 0); return s; };
 
-    // Ground truth: one runtime, feed both ports directly, record acc each frame.
-    std::vector<uint32_t> truth(N + 1);
+    // Ground truth: one runtime, feed both ports directly, record acc each frame. Covers the
+    // main loop (frames 0..N-1, inputs A(f)/B(f)) AND the flush window (frames N..N+kFlush-1,
+    // which repeats A(N-1)/B(N-1)) so truth[] has an entry for every frame either session
+    // simulates, including the trailing flush.
+    std::vector<uint32_t> truth(N + kFlush + 1);
     {
         Runtime g(RP_GFX_D3D11, nullptr); load_refcore_rollback_e2e(g);
         auto rt = reinterpret_cast<rp_runtime*>(&g);
         auto acc = [&]{ uint32_t a=0; rp_runtime_save_state(rt,&a,sizeof(a)); return a; };
         truth[0] = acc();
         std::vector<uint8_t> out(64*64*4);
-        for (int f = 0; f < N; ++f) {
-            rp_input_state a = A(f), b = B(f);
+        for (int f = 0; f < N + kFlush; ++f) {
+            rp_input_state a = (f < N) ? A(f) : A(N-1);
+            rp_input_state b = (f < N) ? B(f) : B(N-1);
             rp_runtime_set_input(rt, 0, &a); rp_runtime_set_input(rt, 1, &b);
             rp_runtime_advance(rt, 1); rp_runtime_render(rt, out.data());
             truth[f+1] = acc();
@@ -102,7 +107,7 @@ TEST_CASE("rollback: mispredictions roll back and converge to lockstep ground tr
         dh->tick_clock(); dj->tick_clock();          // release delayed messages one tick later
     }
     // Flush: keep ticking (repeating the last input) + advancing clocks until both fully reconciled.
-    for (int f = N; f < N + 20; ++f) {
+    for (int f = N; f < N + kFlush; ++f) {
         rp_input_state a = A(N-1), b = B(N-1);
         sh.tick(a, oh.data()); sj.tick(b, oj.data());
         dh->tick_clock(); dj->tick_clock();
@@ -111,11 +116,15 @@ TEST_CASE("rollback: mispredictions roll back and converge to lockstep ground tr
     CHECK(sj.rollback_count() > 0);
     CHECK(sh.status() != RbStatus::Desync);
     CHECK(sj.status() != RbStatus::Desync);
-    // both converged to the ground-truth state at their common confirmed frame
+    // Anchor convergence to the INDEPENDENTLY-computed ground truth (not just peer-vs-peer):
+    // frame() is "next frame to simulate", i.e. [0, frame()) has been simulated, so the live
+    // runtime state after frame() frames matches truth[frame()] exactly (the flush window ran
+    // long enough, >max_prediction, that no stall ever holds frame() back).
     auto acc_of = [](Runtime& r){ uint32_t a=0; rp_runtime_save_state(reinterpret_cast<rp_runtime*>(&r),&a,sizeof(a)); return a; };
-    uint64_t cf = sh.confirmed_frame();
-    REQUIRE(cf >= (uint64_t)N - 1);
-    // After flush, both sessions' reconciled state == ground truth for the frames they've confirmed.
-    // Compare the two peers directly (they must agree) and against truth at frame N (inputs known).
+    uint64_t fh = sh.frame(), fj = sj.frame();
+    REQUIRE(fh == (uint64_t)(N + kFlush));
+    REQUIRE(fj == (uint64_t)(N + kFlush));
+    CHECK(acc_of(rh) == truth[fh]);                   // host reconciled state == ground truth
+    CHECK(acc_of(rj) == truth[fj]);                   // join reconciled state == ground truth
     CHECK(acc_of(rh) == acc_of(rj));                  // peers agree (lockstep-equivalent)
 }
