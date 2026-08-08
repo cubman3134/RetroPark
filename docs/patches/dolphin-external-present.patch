@@ -69,10 +69,10 @@ index 0000000000..8b6320f07d
 +</Project>
 diff --git a/Source/Core/DolphinNoGUI/rp_dolphin.cpp b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
 new file mode 100644
-index 0000000000..3a275b2065
+index 0000000000..e4622a1efa
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
-@@ -0,0 +1,412 @@
+@@ -0,0 +1,405 @@
 +// RetroPark: dolphin_present.dll — in-process vehicle. Boots Dolphin NORMAL HEADLESS on Vulkan, and a
 +// copy-from-XFB producer hooks after_present_event: each present it blits Dolphin's just-rendered XFB
 +// image into the host's imported shared VkImage (own command buffer + QFOT release + timeline signal,
@@ -273,27 +273,17 @@ index 0000000000..3a275b2065
 +    return true;
 +  }
 +
-+  uint64_t call_count = 0;
 +  void OnPresent()
 +  {
-+    ++call_count;
 +    if (!tried_init)
 +    {
 +      tried_init = true;
 +      ok = Init();
-+      fprintf(stderr, "[rp_producer] OnPresent#1 Init=%d\n", (int)ok);
-+      fflush(stderr);
 +    }
 +    if (!ok)
 +      return;
 +
 +    const AbstractTexture* xfb = g_presenter ? g_presenter->GetCurrentXFBTexture() : nullptr;
-+    if (call_count <= 3 || (call_count % 200 == 0))
-+    {
-+      fprintf(stderr, "[rp_producer] OnPresent#%llu xfb=%p frame=%llu\n",
-+              (unsigned long long)call_count, (void*)xfb, (unsigned long long)frame);
-+      fflush(stderr);
-+    }
 +    if (!xfb)
 +      return;
 +    const auto* vxfb = static_cast<const Vulkan::VKTexture*>(xfb);
@@ -414,8 +404,11 @@ index 0000000000..3a275b2065
 +  wc.hInstance = GetModuleHandleW(nullptr);
 +  wc.lpszClassName = kClass;
 +  RegisterClassExW(&wc);
-+  HWND hwnd = CreateWindowExW(0, kClass, L"", WS_OVERLAPPEDWINDOW, 0, 0, (int)ext0.width,
++  // WS_POPUP (no chrome), positioned off-screen and never shown — only a surface for Dolphin's
++  // swapchain so its present path runs; the game is never visible in it.
++  HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, kClass, L"", WS_POPUP, -32000, -32000, (int)ext0.width,
 +                              (int)ext0.height, nullptr, nullptr, wc.hInstance, nullptr);
++  ShowWindow(hwnd, SW_HIDE);
 +  const WindowSystemInfo wsi(WindowSystemType::Windows, nullptr, hwnd, hwnd);
 +  UICommon::InitControllers(wsi);
 +
