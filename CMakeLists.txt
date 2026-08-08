@@ -43,7 +43,9 @@ target_sources(retropark PRIVATE
   src/net/NetProtocol.cpp
   src/net/LoopbackTransport.cpp
   src/net/TcpTransport.cpp
-  src/net/NetSession.cpp)
+  src/net/NetSession.cpp
+  src/net/RollbackPredict.cpp
+  src/net/RollbackSession.cpp)
 target_include_directories(retropark PUBLIC include)
 target_include_directories(retropark PRIVATE src)
 target_compile_features(retropark PUBLIC cxx_std_17)
@@ -71,6 +73,7 @@ target_include_directories(retropark PRIVATE "${VK_GEN_DIR}")
 add_subdirectory(cores/refcore_present)
 add_subdirectory(cores/refcore_present_vk)
 add_subdirectory(cores/refcore_driven)
+add_subdirectory(cores/refcore_rollback)
 
 add_library(retropark_libretro_convert STATIC cores/libretro_shim/PixelConvert.cpp)
 target_include_directories(retropark_libretro_convert PUBLIC cores/libretro_shim external/libretro)

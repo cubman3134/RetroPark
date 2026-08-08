@@ -23,6 +23,8 @@ public:
     rp_result resize(uint32_t w, uint32_t h);
     void set_input(uint32_t port, const rp_input_state& in);
     rp_result present(uint8_t* out_rgba);
+    rp_result advance(int emit_audio);
+    rp_result render(uint8_t* out_rgba);
     size_t serialize_size();
     rp_result save_state(void* buf, size_t size);
     rp_result load_state(const void* buf, size_t size);
@@ -51,6 +53,7 @@ private:
     rp_host_iface host_iface_{};
     rp_input_state input_[2]{};
     std::mutex input_mtx_;
+    bool suppress_audio_ = false;
     uint32_t width_ = 64, height_ = 64;
     bool core_loaded_ = false;
     bool init_ok_ = false;

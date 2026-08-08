@@ -1,0 +1,2 @@
+{ "id":"refcore_rollback", "name":"Reference Rollback Core", "type":"driven",
+  "abi_version":4, "graphics_api":"none", "entry":"refcore_rollback.dll" }

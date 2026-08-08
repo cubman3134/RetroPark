@@ -61,6 +61,7 @@ void Runtime::on_video_refresh(const void* data, uint32_t w, uint32_t h, uint32_
     dr_w_ = w; dr_h_ = h; dr_pitch_ = pitch;
 }
 void Runtime::on_audio_sample(const int16_t* frames, size_t n) {
+    if (suppress_audio_) return;           // silent re-simulation during rollback
     if (!frames || n == 0) return;
     audio_frames_ += n;
     if (!audio_nonsilent_) {
@@ -209,30 +210,38 @@ rp_result Runtime::load_content(const char* path) {
     return RP_OK;
 }
 
-rp_result Runtime::present(uint8_t* out_rgba) {
+rp_result Runtime::advance(int emit_audio) {
+    if (!backend_) return RP_ERR_DEVICE;
+    if (!(core_loaded_ && core_type_ == RP_CORE_DRIVEN)) return RP_ERR_UNSUPPORTED;
+    if (requires_content_ && !content_loaded_) return RP_ERR_INTERNAL;
+    std::string err;
+    // Rewind ring capture (forward frames only). A present that re-renders a rewound-to
+    // frame (rewind_replay_) must NOT capture — that would re-grow the ring with the very
+    // frames we are stepping back through. Clearing the flag here means the NEXT forward
+    // present resumes capturing cleanly from the restored point (spec §2, e2e step 5).
+    if (rewind_replay_) {
+        rewind_replay_ = false;
+    } else if (rewind_enabled_) {
+        size_t sz = loader_.serialize_size();
+        if (sz > 0) {
+            std::vector<uint8_t> snap(sz);
+            std::string serr;
+            // A serialize failure mid-capture just skips this snapshot — never crash.
+            if (loader_.serialize(snap.data(), sz, serr) == RP_OK)
+                rewind_ring_push(rewind_ring_, std::move(snap), rewind_max_);
+        }
+    }
+    dr_have_ = false;
+    suppress_audio_ = (emit_audio == 0);
+    rp_result r = loader_.run_frame(err);
+    suppress_audio_ = false;               // always clear, even on failure
+    return r;
+}
+
+rp_result Runtime::render(uint8_t* out_rgba) {
     if (!backend_) return RP_ERR_DEVICE;
     std::string err;
     if (core_loaded_ && core_type_ == RP_CORE_DRIVEN) {
-        if (requires_content_ && !content_loaded_) return RP_ERR_INTERNAL;
-        // Rewind ring capture (forward frames only). A present that re-renders a rewound-to
-        // frame (rewind_replay_) must NOT capture — that would re-grow the ring with the very
-        // frames we are stepping back through. Clearing the flag here means the NEXT forward
-        // present resumes capturing cleanly from the restored point (spec §2, e2e step 5).
-        if (rewind_replay_) {
-            rewind_replay_ = false;
-        } else if (rewind_enabled_) {
-            size_t sz = loader_.serialize_size();
-            if (sz > 0) {
-                std::vector<uint8_t> snap(sz);
-                std::string serr;
-                // A serialize failure mid-capture just skips this snapshot — never crash.
-                if (loader_.serialize(snap.data(), sz, serr) == RP_OK)
-                    rewind_ring_push(rewind_ring_, std::move(snap), rewind_max_);
-            }
-        }
-        dr_have_ = false;
-        rp_result r = loader_.run_frame(err);
-        if (r != RP_OK) return r;
         // Spec §4: a frame with a too-small pitch or dimensions beyond the core's declared
         // max geometry is skipped (treated as a duplicate of the last good frame) rather
         // than uploaded.
@@ -245,6 +254,15 @@ rp_result Runtime::present(uint8_t* out_rgba) {
     uint32_t idx = 0; uint64_t sv = 0;
     bool has = ring_.latest_ready(idx, sv);
     return backend_->composite_and_present(idx, sv, has, out_rgba, err);
+}
+
+rp_result Runtime::present(uint8_t* out_rgba) {
+    if (core_loaded_ && core_type_ == RP_CORE_DRIVEN) {
+        rp_result r = advance(1);
+        if (r != RP_OK) return r;
+        return render(out_rgba);
+    }
+    return render(out_rgba);                // presenting: composite_and_present, unchanged
 }
 
 size_t Runtime::serialize_size() {
@@ -320,6 +338,12 @@ void rp_runtime_set_input(rp_runtime* rt, uint32_t port, const rp_input_state* i
 }
 rp_result rp_runtime_present(rp_runtime* rt, uint8_t* out_rgba) {
     return reinterpret_cast<Runtime*>(rt)->present(out_rgba);
+}
+rp_result rp_runtime_advance(rp_runtime* rt, int emit_audio) {
+    return reinterpret_cast<Runtime*>(rt)->advance(emit_audio);
+}
+rp_result rp_runtime_render(rp_runtime* rt, uint8_t* out_rgba) {
+    return reinterpret_cast<Runtime*>(rt)->render(out_rgba);
 }
 void rp_runtime_audio_stats(rp_runtime* rt, uint64_t* frames_out, int* nonsilent_out) {
     auto* r = reinterpret_cast<Runtime*>(rt);
