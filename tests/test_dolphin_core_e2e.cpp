@@ -88,6 +88,13 @@ TEST_CASE("dolphin core: Runtime loads dolphin_present + a GC ISO and presents i
         if (fp) { fwrite(late.data(), 1, late.size(), fp); fclose(fp); }
     }
 
+    // Slice L: Dolphin's audio must reach the host through rp_host.audio_sample -> XAudio2 (device-
+    // independent counters; they tally even with no output device). Read before teardown.
+    uint64_t audio_frames = 0; int audio_nonsilent = 0;
+    rp_runtime_audio_stats(rt, &audio_frames, &audio_nonsilent);
+    fprintf(stderr, "[dolphin-core] audio: frames=%llu nonsilent=%d\n",
+            (unsigned long long)audio_frames, audio_nonsilent); fflush(stderr);
+
     rp_runtime_unload_core(rt);
     rp_runtime_destroy(rt);
 
@@ -118,4 +125,8 @@ TEST_CASE("dolphin core: Runtime loads dolphin_present + a GC ISO and presents i
     fprintf(stderr, "[dolphin-core] overlay tint (B-G): top-left=%.1f bottom-right=%.1f\n", tint_tl, tint_br);
     fflush(stderr);
     CHECK(tint_tl > tint_br + 30.0);
+
+    // Dolphin's game audio reached RetroPark's output path, and it is real sound (not silence).
+    CHECK(audio_frames > 0);
+    CHECK(audio_nonsilent == 1);
 }
