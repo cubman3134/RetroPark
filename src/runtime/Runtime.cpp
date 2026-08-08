@@ -214,6 +214,12 @@ rp_result Runtime::load_content(const char* path) {
             r = loader_.start(err);
             if (r != RP_OK) return r;
         }
+        // A presenting core that produces audio reports its rate via get_av_info (e.g. dolphin_present
+        // pulls Dolphin's 48 kHz mix and forwards it through audio_sample). Open host audio best-effort;
+        // a presenting core without get_av_info (refcore_present_vk) returns UNSUPPORTED and stays silent.
+        rp_av_info av{};
+        if (loader_.get_av_info(&av, err) == RP_OK && av.sample_rate > 0.0)
+            open_audio(av);
         return RP_OK;
     }
     if (core_type_ != RP_CORE_DRIVEN) return RP_ERR_INTERNAL;
