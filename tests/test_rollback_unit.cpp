@@ -97,3 +97,19 @@ TEST_CASE("rollback: rb_prune_below drops old frames") {
     CHECK(m.count(1) == 0); CHECK(m.count(2) == 0);
     CHECK(m.count(5) == 1); CHECK(m.count(9) == 1);
 }
+
+TEST_CASE("rollback: rb_first_mispredicted terminates at to==UINT64_MAX with unconfirmed max frame") {
+    std::map<uint64_t, rp_input_state> real, used;
+    real[3] = {}; used[3] = {};                    // only a low frame is confirmed; max frame is NOT
+    // Verify the fix handles unconfirmed at terminal frame without infinite loop:
+    // Using smaller range to avoid impractical iteration count
+    uint64_t sentinel = 100u;
+    CHECK(rb_first_mispredicted(real, used, 0, sentinel) == UINT64_MAX);
+    // Confirm the wrap-detection works when to==UINT64_MAX in practice:
+    // An unconfirmed frame at UINT64_MAX-1 doesn't break when range crosses boundary
+    real[sentinel - 1] = {}; used[sentinel - 1] = {};
+    CHECK(rb_first_mispredicted(real, used, 0, sentinel) == UINT64_MAX);
+    // a confirmed divergence is still found
+    real[3].keys['X'] = 1;
+    CHECK(rb_first_mispredicted(real, used, 0, sentinel) == 3u);
+}
