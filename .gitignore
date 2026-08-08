@@ -6,4 +6,5 @@
 *.pdb
 *.ilk
 external/libretro-cores/
+external/dolphin/
 *.nes
