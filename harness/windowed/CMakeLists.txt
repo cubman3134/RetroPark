@@ -1,5 +1,5 @@
 add_executable(retropark_harness WIN32 main.cpp)
-target_link_libraries(retropark_harness PRIVATE retropark)
+target_link_libraries(retropark_harness PRIVATE retropark xinput)
 # Netplay wiring (--netplay-host/--netplay-join) uses rp::net::NetSession/TcpTransport and
 # rp::Runtime directly, which live under src/ (PRIVATE to the retropark target, same reason
 # tests/CMakeLists.txt adds this for retropark_tests).

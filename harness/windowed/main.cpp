@@ -7,6 +7,7 @@
 #include "net/TcpTransport.h"
 #include "net/Crc32.h"
 #include "runtime/Runtime.h"
+#include "xinput_map.h"
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
@@ -83,6 +84,9 @@ static rp_input_state read_local_input() {
     for (int vk = 0; vk < 256; ++vk) {
         if (GetAsyncKeyState(vk) & 0x8000) s.keys[vk] = 1;
     }
+    XINPUT_STATE xi{};
+    if (XInputGetState(0, &xi) == ERROR_SUCCESS)
+        xinput_to_pad(xi.Gamepad, s);   // merge gamepad into the same rp_input_state
     return s;
 }
 
@@ -303,6 +307,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
                 break;
             }
         } else {
+            rp_input_state local = read_local_input();
+            rp_runtime_set_input(g_rt, 0, &local);   // host-owned input for driven AND presenting cores
             const bool rewinding = g_rewind_enabled && (GetAsyncKeyState(kRewindVK) & 0x8000) != 0;
             if (rewinding) {
                 // Step one frame into the past and show it. RP_ERR_NOT_FOUND means the ring is
