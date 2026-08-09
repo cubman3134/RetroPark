@@ -65,6 +65,13 @@ TEST_CASE("dolphin core: Runtime loads dolphin_present + a GC ISO and presents i
     REQUIRE(rp_runtime_load_core(rt, kCoreDir) == RP_OK);
     REQUIRE(rp_runtime_load_content(rt, kRom) == RP_OK);
 
+    // Slice M: host-owned input. Hold a strong input (full Control Stick left + A + Start); the vehicle's
+    // override pulls it via rp_host.input_state each SI poll, which routes through Runtime::on_input.
+    rp_input_state held{};
+    held.pad_axes[RP_AXIS_LEFT_X] = -32767;                 // full left on the analog stick
+    held.pad_buttons = (uint16_t)((1u << RP_PAD_A) | (1u << RP_PAD_START));
+    rp_runtime_set_input(rt, 0, &held);
+
     // Dolphin boots over a few seconds; present() returns non-OK until the first XFB frame lands in the
     // ring. Poll for the first good frame, then keep pumping to capture an early and a late frame.
     // The video/overlay proof is captured by frame 240 (the settled early-boot frame). Dolphin's boot
@@ -106,6 +113,9 @@ TEST_CASE("dolphin core: Runtime loads dolphin_present + a GC ISO and presents i
     fprintf(stderr, "[dolphin-core] audio: frames=%llu nonsilent=%d\n",
             (unsigned long long)audio_frames, audio_nonsilent); fflush(stderr);
 
+    uint64_t input_polls = rp_runtime_input_poll_count(rt);
+    fprintf(stderr, "[dolphin-core] input polls=%llu\n", (unsigned long long)input_polls); fflush(stderr);
+
     rp_runtime_unload_core(rt);
     rp_runtime_destroy(rt);
 
@@ -140,4 +150,7 @@ TEST_CASE("dolphin core: Runtime loads dolphin_present + a GC ISO and presents i
     // Dolphin's game audio reached RetroPark's output path, and it is real sound (not silence).
     CHECK(audio_frames > 0);
     CHECK(audio_nonsilent == 1);
+
+    // Dolphin polled host input through the ABI (the override called rp_host.input_state each SI poll).
+    CHECK(input_polls > 0);
 }

@@ -76,10 +76,10 @@ index 0000000000..ee309235fb
 +</Project>
 diff --git a/Source/Core/DolphinNoGUI/rp_dolphin.cpp b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
 new file mode 100644
-index 0000000000..e3caf9da0f
+index 0000000000..585f35d62c
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
-@@ -0,0 +1,546 @@
+@@ -0,0 +1,624 @@
 +// RetroPark: dolphin_present.dll — in-process vehicle. Boots Dolphin NORMAL HEADLESS on Vulkan, and a
 +// copy-from-XFB producer hooks after_present_event: each present it blits Dolphin's just-rendered XFB
 +// image into the host's imported shared VkImage (own command buffer + QFOT release + timeline signal,
@@ -123,6 +123,15 @@ index 0000000000..e3caf9da0f
 +
 +#include "AudioCommon/Mixer.h"
 +#include "AudioCommon/SoundStream.h"
++
++#include <optional>
++#include <string_view>
++
++#include "Core/HW/GCPad.h"
++#include "Core/HW/GCPadEmu.h"
++#include "Core/HW/SI/SI_Device.h"
++#include "InputCommon/InputConfig.h"
++#include "InputCommon/ControllerEmu/ControllerEmu.h"
 +
 +#include "retropark/retropark_abi.h"  // RetroPark C ABI: rp_core_abi / rp_host_iface / rp_surface_set
 +
@@ -416,6 +425,10 @@ index 0000000000..e3caf9da0f
 +  // and our puller thread (below) pulls that mix and forwards it to the host via rp_host.audio_sample.
 +  Config::SetBaseOrCurrent(Config::MAIN_AUDIO_BACKEND, BACKEND_NULLSOUND);
 +
++  // Host-owned input (Slice M): port 0 is a standard GC controller so the SI polls it; our override
++  // (installed after boot) feeds it from rp_host.input_state. Without this, nothing polls input.
++  Config::SetBaseOrCurrent(Config::GetInfoForSIDevice(0), SerialInterface::SIDEVICE_GC_CONTROLLER);
++
 +  // Fast-boot the vehicle to the audio-producing part of the game: the lock-step present throttles
 +  // emulation to the host's consume rate, so only a few game-seconds elapse in the gated capture window.
 +  // Skip the GC IPL and speed up the disc transfer so the apploader/load (a silent white screen that
@@ -476,8 +489,70 @@ index 0000000000..e3caf9da0f
 +      }
 +    });
 +
++    bool input_override_installed = false;
 +    while (g_running.load(std::memory_order_acquire))
 +    {
++      if (!input_override_installed && Pad::IsInitialized() && Pad::GetConfig() &&
++          Pad::GetConfig()->GetControllerCount() > 0)
++      {
++        Pad::GetConfig()->GetController(0)->SetInputOverrideFunction(
++            [](std::string_view group, std::string_view control,
++               ControlState /*state*/) -> std::optional<ControlState> {
++              if (!g_producer.rp_host.input_state)
++                return std::nullopt;   // direct C-API mode (Slice J): no host input, unchanged
++              rp_input_state in{};
++              g_producer.rp_host.input_state(g_producer.rp_host.host, 0, &in);
++              auto key = [&](int vk) { return in.keys[vk] != 0; };
++              auto btn = [&](int bit) { return ((in.pad_buttons >> bit) & 1u) != 0; };
++              auto ax  = [&](int i) { return in.pad_axes[i] / 32767.0; };
++              if (group == "Buttons") {
++                if (control == "A")     return (btn(RP_PAD_A)     || key('K'))       ? 1.0 : 0.0;
++                if (control == "B")     return (btn(RP_PAD_B)     || key('J'))       ? 1.0 : 0.0;
++                if (control == "X")     return (btn(RP_PAD_X)     || key('L'))       ? 1.0 : 0.0;
++                if (control == "Y")     return (btn(RP_PAD_Y)     || key('I'))       ? 1.0 : 0.0;
++                if (control == "Z")     return (btn(RP_PAD_SELECT)|| key('U'))       ? 1.0 : 0.0;
++                if (control == "Start") return (btn(RP_PAD_START) || key(VK_RETURN)) ? 1.0 : 0.0;
++                return std::nullopt;
++              }
++              if (group == "Main Stick") {
++                double x = ax(RP_AXIS_LEFT_X), y = ax(RP_AXIS_LEFT_Y);
++                if (key(VK_LEFT))  x = -1.0;
++                if (key(VK_RIGHT)) x =  1.0;
++                if (key(VK_DOWN))  y = -1.0;
++                if (key(VK_UP))    y =  1.0;
++                if (control == "Up")    return y > 0 ?  y : 0.0;
++                if (control == "Down")  return y < 0 ? -y : 0.0;
++                if (control == "Left")  return x < 0 ? -x : 0.0;
++                if (control == "Right") return x > 0 ?  x : 0.0;
++                return std::nullopt;   // Modifier
++              }
++              if (group == "C-Stick") {
++                double x = ax(RP_AXIS_RIGHT_X), y = ax(RP_AXIS_RIGHT_Y);
++                if (control == "Up")    return y > 0 ?  y : 0.0;
++                if (control == "Down")  return y < 0 ? -y : 0.0;
++                if (control == "Left")  return x < 0 ? -x : 0.0;
++                if (control == "Right") return x > 0 ?  x : 0.0;
++                return std::nullopt;
++              }
++              if (group == "Triggers") {
++                double lt = ax(RP_AXIS_LEFT_TRIGGER), rt = ax(RP_AXIS_RIGHT_TRIGGER);
++                if (control == "L")        return (btn(RP_PAD_L) || lt > 0.5) ? 1.0 : 0.0;
++                if (control == "R")        return (btn(RP_PAD_R) || rt > 0.5) ? 1.0 : 0.0;
++                if (control == "L-Analog") return btn(RP_PAD_L) ? 1.0 : lt;
++                if (control == "R-Analog") return btn(RP_PAD_R) ? 1.0 : rt;
++                return std::nullopt;
++              }
++              if (group == "D-Pad") {
++                if (control == "Up")    return btn(RP_PAD_DPAD_UP)    ? 1.0 : 0.0;
++                if (control == "Down")  return btn(RP_PAD_DPAD_DOWN)  ? 1.0 : 0.0;
++                if (control == "Left")  return btn(RP_PAD_DPAD_LEFT)  ? 1.0 : 0.0;
++                if (control == "Right") return btn(RP_PAD_DPAD_RIGHT) ? 1.0 : 0.0;
++                return std::nullopt;
++              }
++              return std::nullopt;
++            });
++        input_override_installed = true;
++      }
 +      MSG msg;
 +      while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
 +      {
@@ -490,6 +565,9 @@ index 0000000000..e3caf9da0f
 +    // Stop pulling BEFORE Core::Shutdown destroys the SoundStream/Mixer.
 +    if (audio_thread.joinable())
 +      audio_thread.join();
++    if (input_override_installed && Pad::IsInitialized() && Pad::GetConfig() &&
++        Pad::GetConfig()->GetControllerCount() > 0)
++      Pad::GetConfig()->GetController(0)->ClearInputOverrideFunction();
 +    Core::Stop(system);
 +    Core::Shutdown(system);
 +  }
