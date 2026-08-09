@@ -148,10 +148,10 @@ index 0000000000..ee309235fb
 +</Project>
 diff --git a/Source/Core/DolphinNoGUI/rp_dolphin.cpp b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
 new file mode 100644
-index 0000000000..6601a26a35
+index 0000000000..6fe6a5ff17
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
-@@ -0,0 +1,651 @@
+@@ -0,0 +1,663 @@
 +// RetroPark: dolphin_present.dll — in-process vehicle. Boots Dolphin NORMAL HEADLESS on Vulkan, and a
 +// copy-from-XFB producer hooks after_present_event: each present it blits Dolphin's just-rendered XFB
 +// image into the host's imported shared VkImage (own command buffer + QFOT release + timeline signal,
@@ -482,6 +482,9 @@ index 0000000000..6601a26a35
 +std::thread g_host_thread;
 +std::atomic<bool> g_running{false};
 +
++Common::UniqueBuffer<u8> g_state_buf;   // last captured savestate
++size_t g_state_size = 0;                // its actual byte length (buffer may be larger)
++
 +void HostThread(std::string rom, std::string user_dir)
 +{
 +  // No modal dialogs: a no-op alert handler (returns "proceed") intercepts every panic regardless of
@@ -667,6 +670,10 @@ index 0000000000..6601a26a35
 +  g_running.store(false, std::memory_order_release);
 +  if (g_host_thread.joinable())
 +    g_host_thread.join();
++  // Drop the last snapshot so a stop->start of a different game can't hand back the previous game's
++  // state; also frees the ~94 MB buffer.
++  g_state_size = 0;
++  g_state_buf = {};
 +}
 +}  // namespace
 +
@@ -769,12 +776,14 @@ index 0000000000..6601a26a35
 +  out->pixel_format = 0;
 +}
 +
-+Common::UniqueBuffer<u8> g_state_buf;   // last captured savestate
-+size_t g_state_size = 0;                // its actual byte length (buffer may be larger)
-+
++// Heavyweight: this performs a FULL emulation-pausing save (tens of MB, seconds-long DoState walk), so
++// it must NOT be polled per-frame (relevant once Dolphin rewind/netplay lands, which capture per frame).
 +size_t dp_serialize_size(rp_core*)
 +{
-+  if (!g_running.load(std::memory_order_acquire))
++  // g_running is set before Dolphin's async boot finishes; also require the Core to actually be Running
++  // (Core::IsRunning is true only for Running/Paused, not Starting) so a pre-boot call can't race boot
++  // by running State::SaveToBuffer->DoState inline on the caller thread. Cleanly returns 0 before boot.
++  if (!g_running.load(std::memory_order_acquire) || !Core::IsRunning(Core::System::GetInstance()))
 +    return 0;   // not booted -> Runtime::save_state reports RP_ERR_UNSUPPORTED
 +  g_state_size = State::SaveToBufferOnCPUThread(Core::System::GetInstance(), g_state_buf);
 +  return g_state_size;
@@ -788,7 +797,10 @@ index 0000000000..6601a26a35
 +}
 +rp_result dp_unserialize(rp_core*, const void* data, size_t size)
 +{
-+  if (!g_running.load(std::memory_order_acquire) || !data || size == 0)
++  // Same pre-boot guard as dp_serialize_size: without a Running Core, LoadFromBuffer->DoState would run
++  // inline on the caller thread and race the async boot.
++  if (!g_running.load(std::memory_order_acquire) || !Core::IsRunning(Core::System::GetInstance()) ||
++      !data || size == 0)
 +    return RP_ERR_BAD_ARG;
 +  std::vector<u8> tmp(size);
 +  std::memcpy(tmp.data(), data, size);
