@@ -40,6 +40,7 @@ public:
 
     uint64_t audio_frames() const { return audio_frames_; }
     bool audio_nonsilent() const { return audio_nonsilent_; }
+    uint64_t input_polls() const { return input_polls_.load(std::memory_order_relaxed); }
 
 private:
     rp_result rebuild_surfaces(std::string& err);
@@ -68,6 +69,7 @@ private:
     std::unique_ptr<IAudioOutput> audio_;
     std::atomic<uint64_t> audio_frames_{0};
     std::atomic<bool>     audio_nonsilent_{false};
+    std::atomic<uint64_t> input_polls_{0};
 
     // Rewind ring: bounded uncompressed per-frame snapshots of the driven core's pre-frame
     // state, captured at the top of each forward present(). See RewindRing.h / spec §2.

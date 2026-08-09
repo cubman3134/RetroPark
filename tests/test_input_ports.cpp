@@ -22,3 +22,20 @@ TEST_CASE("runtime: two input ports route independently") {
     // out-of-range port is clamped/ignored, never a crash
     rt.on_input(7, &out0);   // clamps to a valid port; just must not crash
 }
+
+TEST_CASE("runtime: input poll counter tracks on_input calls") {
+    Runtime rt(RP_GFX_NONE, nullptr);
+    auto* h = reinterpret_cast<rp_runtime*>(&rt);
+    CHECK(rp_runtime_input_poll_count(h) == 0);
+    rp_input_state out{};
+    rt.on_input(0, &out);
+    rt.on_input(0, &out);
+    rt.on_input(1, &out);
+    CHECK(rp_runtime_input_poll_count(h) == 3);   // every pull counts, any port
+    // Also assert the layout constants are the distinct values consumers rely on.
+    CHECK(RP_PAD_A == 0);
+    CHECK(RP_PAD_START == 7);
+    CHECK(RP_AXIS_LEFT_Y == 1);
+    rt.unload_core();                              // resets the counter (no core loaded is fine)
+    CHECK(rp_runtime_input_poll_count(h) == 0);
+}

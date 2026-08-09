@@ -63,6 +63,30 @@ typedef struct rp_input_state {
     uint16_t pad_buttons;
 } rp_input_state;
 
+/* rp_input_state.pad_buttons bit indices (generic abstract pad; a bit is (1u << RP_PAD_x)). */
+#define RP_PAD_A          0
+#define RP_PAD_B          1
+#define RP_PAD_X          2
+#define RP_PAD_Y          3
+#define RP_PAD_L          4   /* left shoulder (digital) */
+#define RP_PAD_R          5   /* right shoulder (digital) */
+#define RP_PAD_SELECT     6
+#define RP_PAD_START      7
+#define RP_PAD_L3         8   /* left stick click */
+#define RP_PAD_R3         9   /* right stick click */
+#define RP_PAD_DPAD_UP    10
+#define RP_PAD_DPAD_DOWN  11
+#define RP_PAD_DPAD_LEFT  12
+#define RP_PAD_DPAD_RIGHT 13
+#define RP_PAD_GUIDE      14
+/* rp_input_state.pad_axes[] indices. Sticks -32768..32767 (Y up = positive); triggers 0..32767. */
+#define RP_AXIS_LEFT_X        0
+#define RP_AXIS_LEFT_Y        1
+#define RP_AXIS_RIGHT_X       2
+#define RP_AXIS_RIGHT_Y       3
+#define RP_AXIS_LEFT_TRIGGER  4
+#define RP_AXIS_RIGHT_TRIGGER 5
+
 typedef struct rp_av_info {
     double   fps;
     double   sample_rate;

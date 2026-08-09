@@ -47,6 +47,7 @@ void Runtime::on_submit(uint32_t index, uint64_t generation, uint64_t sync_value
     ring_.accept_submit(index, generation, sync_value);
 }
 void Runtime::on_input(uint32_t port, rp_input_state* out) {
+    input_polls_.fetch_add(1, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lk(input_mtx_);
     *out = input_[port & 1u];               // clamp to {0,1}
 }
@@ -184,6 +185,7 @@ rp_result Runtime::load_core(const std::string& core_dir) {
 }
 
 rp_result Runtime::unload_core() {
+    input_polls_.store(0, std::memory_order_relaxed);
     if (!core_loaded_ && loader_.state() == LoaderState::Unloaded) return RP_OK;
     loader_.destroy();
     module_.reset();
@@ -361,6 +363,9 @@ rp_result rp_runtime_resize(rp_runtime* rt, uint32_t w, uint32_t h) {
 }
 void rp_runtime_set_input(rp_runtime* rt, uint32_t port, const rp_input_state* in) {
     if (in) reinterpret_cast<Runtime*>(rt)->set_input(port, *in);
+}
+uint64_t rp_runtime_input_poll_count(rp_runtime* rt) {
+    return reinterpret_cast<Runtime*>(rt)->input_polls();
 }
 rp_result rp_runtime_present(rp_runtime* rt, uint8_t* out_rgba) {
     return reinterpret_cast<Runtime*>(rt)->present(out_rgba);

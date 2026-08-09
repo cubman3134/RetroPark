@@ -20,6 +20,10 @@ rp_result   rp_runtime_load_content(rp_runtime* rt, const char* path);
 rp_result   rp_runtime_resize(rp_runtime* rt, uint32_t width, uint32_t height);
 void        rp_runtime_set_input(rp_runtime* rt, uint32_t port, const rp_input_state* in);
 
+/* Number of times a core has pulled host input via the input_state callback since the last core load.
+   Device-independent; used to prove a presenting core (e.g. Dolphin) is polling host input. */
+uint64_t    rp_runtime_input_poll_count(rp_runtime* rt);
+
 /* Composite latest core frame + overlay; if out_rgba != NULL copies the RGBA8 image. */
 rp_result   rp_runtime_present(rp_runtime* rt, uint8_t* out_rgba);
 
