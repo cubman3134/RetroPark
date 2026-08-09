@@ -84,9 +84,11 @@ already-shipping fields. Existing consumers (harness keyboard path, libretro shi
   3. Returns `std::nullopt` for controls we don't drive (Dolphin falls back to its unmapped physical device
      = neutral).
 - **Clear on stop.** `ClearInputOverrideFunction()` (and drop the host ref) in `dp_stop`/before teardown.
-- The exact GC group/control names (`"Buttons"`, `"Control Stick"`, `"C-Stick"`, `"Triggers"`, `"D-Pad"`
+- The exact GC group/control names (`"Buttons"`, `"Main Stick"`, `"C-Stick"`, `"Triggers"`, `"D-Pad"`
   and their control names A/B/X/Y/Z/Start/Up/Down/Left/Right/L/R) are read from `Core/HW/GCPadEmu.cpp` when
-  writing the plan; the override matches on them.
+  writing the plan; the override matches on them. Note the analog-stick groups (`"Main Stick"`/`"C-Stick"`)
+  are queried by control names **`"X"`/`"Y"`** (signed −1..1, per `StickGate.h`/`AnalogStick.cpp`), NOT the
+  direction names — only the **D-Pad** uses Up/Down/Left/Right.
 
 ### RetroPark Runtime — an input-poll counter (small change)
 `on_input` / `set_input` / `input_[2]` (Slice G) already serve the `input_state` callback. Add a single

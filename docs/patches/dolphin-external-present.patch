@@ -76,15 +76,16 @@ index 0000000000..ee309235fb
 +</Project>
 diff --git a/Source/Core/DolphinNoGUI/rp_dolphin.cpp b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
 new file mode 100644
-index 0000000000..585f35d62c
+index 0000000000..9a9c7c1903
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
-@@ -0,0 +1,624 @@
+@@ -0,0 +1,621 @@
 +// RetroPark: dolphin_present.dll — in-process vehicle. Boots Dolphin NORMAL HEADLESS on Vulkan, and a
 +// copy-from-XFB producer hooks after_present_event: each present it blits Dolphin's just-rendered XFB
 +// image into the host's imported shared VkImage (own command buffer + QFOT release + timeline signal,
 +// the refcore_present_vk producer pattern), lock-stepped to the host consume. Not upstream Dolphin.
 +
++#include <algorithm>
 +#include <atomic>
 +#include <cstdint>
 +#include <cstring>
@@ -520,18 +521,14 @@ index 0000000000..585f35d62c
 +                if (key(VK_RIGHT)) x =  1.0;
 +                if (key(VK_DOWN))  y = -1.0;
 +                if (key(VK_UP))    y =  1.0;
-+                if (control == "Up")    return y > 0 ?  y : 0.0;
-+                if (control == "Down")  return y < 0 ? -y : 0.0;
-+                if (control == "Left")  return x < 0 ? -x : 0.0;
-+                if (control == "Right") return x > 0 ?  x : 0.0;
-+                return std::nullopt;   // Modifier
++                if (control == "X") return std::clamp(x, -1.0, 1.0);
++                if (control == "Y") return std::clamp(y, -1.0, 1.0);
++                return std::nullopt;
 +              }
 +              if (group == "C-Stick") {
 +                double x = ax(RP_AXIS_RIGHT_X), y = ax(RP_AXIS_RIGHT_Y);
-+                if (control == "Up")    return y > 0 ?  y : 0.0;
-+                if (control == "Down")  return y < 0 ? -y : 0.0;
-+                if (control == "Left")  return x < 0 ? -x : 0.0;
-+                if (control == "Right") return x > 0 ?  x : 0.0;
++                if (control == "X") return std::clamp(x, -1.0, 1.0);
++                if (control == "Y") return std::clamp(y, -1.0, 1.0);
 +                return std::nullopt;
 +              }
 +              if (group == "Triggers") {

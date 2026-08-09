@@ -84,9 +84,17 @@ static rp_input_state read_local_input() {
     for (int vk = 0; vk < 256; ++vk) {
         if (GetAsyncKeyState(vk) & 0x8000) s.keys[vk] = 1;
     }
-    XINPUT_STATE xi{};
-    if (XInputGetState(0, &xi) == ERROR_SUCCESS)
-        xinput_to_pad(xi.Gamepad, s);   // merge gamepad into the same rp_input_state
+    static int xi_probe = 0;
+    static bool xi_connected = true;
+    if (xi_connected || (++xi_probe % 120) == 0) {   // when absent, re-probe only every ~120 frames
+        XINPUT_STATE xi{};
+        if (XInputGetState(0, &xi) == ERROR_SUCCESS) {
+            xinput_to_pad(xi.Gamepad, s);   // merge gamepad into the same rp_input_state
+            xi_connected = true;
+        } else {
+            xi_connected = false;
+        }
+    }
     return s;
 }
 
