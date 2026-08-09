@@ -122,6 +122,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     bool use_vulkan = false;
     bool use_driven = false;
     std::string content_path;
+    std::string custom_core_dir;
     // Netplay (manual 2-machine demo): --netplay-host <port> or --netplay-join <ip:port>.
     bool netplay_host_flag = false;
     bool netplay_join_flag = false;
@@ -142,6 +143,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
                     use_driven = true;
                 } else if (a == L"--content" && i + 1 < argc) {
                     content_path = narrow(argv[i + 1]);
+                } else if (a == L"--core" && i + 1 < argc) {
+                    custom_core_dir = narrow(argv[i + 1]);
                 } else if (a == L"--netplay-host" && i + 1 < argc) {
                     netplay_host_flag = true;
                     netplay_port = static_cast<uint16_t>(std::atoi(narrow(argv[i + 1]).c_str()));
@@ -180,7 +183,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         nullptr, nullptr, hInst, nullptr);
 
     g_rt = rp_runtime_create(api, hwnd);
-    if (use_content) {
+    if (!custom_core_dir.empty()) {
+        // Arbitrary Vulkan presenting core (e.g. dolphin_present). --content feeds it the ROM; F5/F7 then
+        // save/load it via the already-generic key handler.
+        rp_runtime_resize(g_rt, 640, 480);
+        rp_runtime_load_core(g_rt, custom_core_dir.c_str());
+        if (use_content) rp_runtime_load_content(g_rt, content_path.c_str());
+    } else if (use_content) {
         rp_runtime_resize(g_rt, 256, 240);   // NES resolution
         rp_runtime_load_core(g_rt, core_dir);
         rp_runtime_load_content(g_rt, content_path.c_str());
