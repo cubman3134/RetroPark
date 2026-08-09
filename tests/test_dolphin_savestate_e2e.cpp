@@ -65,8 +65,12 @@ TEST_CASE("dolphin savestate: save -> diverge -> load re-runs deterministically 
     std::vector<uint8_t> img(W * H * 4, 0), frameN, A, B;
     const int K = 60;
 
-    // Advance to a settled frame N (~5s of boot), capture it.
-    REQUIRE(pump(rt, img, 260) >= 260);
+    // Advance to game-frame N, deep enough that the game is past its static boot/logo holds and into the
+    // sustained-animation title/attract screen. "Good presents" count consumed Dolphin frames, which are
+    // deterministic under neutral input, so a fixed count lands on the same game-frame every run; ~900 is
+    // solidly inside the animated region (the N..N+K window reliably moves), unlike the earlier boot where
+    // wide static logo holds could freeze frameN and A into a false "frozen" reading.
+    REQUIRE(pump(rt, img, 900) >= 900);
     frameN = img;
 
     // Save state here.

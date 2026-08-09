@@ -1,3 +1,75 @@
+diff --git a/Source/Core/Core/State.cpp b/Source/Core/Core/State.cpp
+index 040c60f6ab..47df044193 100644
+--- a/Source/Core/Core/State.cpp
++++ b/Source/Core/Core/State.cpp
+@@ -5,6 +5,7 @@
+ 
+ #include <algorithm>
+ #include <filesystem>
++#include <future>
+ #include <locale>
+ #include <map>
+ #include <mutex>
+@@ -257,6 +258,31 @@ static std::size_t SaveToBuffer(Core::System& system, Common::UniqueBuffer<u8>&
+   return 0;
+ }
+ 
++std::size_t SaveToBufferOnCPUThread(Core::System& system, Common::UniqueBuffer<u8>& buffer)
++{
++  std::size_t result = 0;
++  std::promise<void> done;
++  // RunOnCPUThread is fire-and-forget when off the CPU thread; the promise makes us wait for the save.
++  Core::RunOnCPUThread(system, [&] {
++    result = SaveToBuffer(system, buffer);
++    done.set_value();
++  });
++  done.get_future().wait();
++  return result;
++}
++
++bool LoadFromBufferOnCPUThread(Core::System& system, std::span<u8> buffer)
++{
++  bool ok = false;
++  std::promise<void> done;
++  Core::RunOnCPUThread(system, [&] {
++    ok = LoadFromBuffer(system, buffer);
++    done.set_value();
++  });
++  done.get_future().wait();
++  return ok;
++}
++
+ namespace
+ {
+ struct SlotWithTimestamp
+diff --git a/Source/Core/Core/State.h b/Source/Core/Core/State.h
+index 1c4eeb0554..a42056d4c3 100644
+--- a/Source/Core/Core/State.h
++++ b/Source/Core/Core/State.h
+@@ -7,9 +7,11 @@
+ 
+ #include <cstddef>
+ #include <functional>
++#include <span>
+ #include <string>
+ #include <type_traits>
+ 
++#include "Common/Buffer.h"
+ #include "Common/CommonTypes.h"
+ 
+ namespace Core
+@@ -98,6 +100,11 @@ void Load(Core::System& system, int slot);
+ void SaveAs(Core::System& system, std::string filename);
+ void LoadAs(Core::System& system, std::string filename);
+ 
++// RetroPark: synchronous in-memory save/load, run on the CPU thread and waited on (so the caller gets a
++// fully-captured buffer). Returns the state size (0 on failure) / success.
++std::size_t SaveToBufferOnCPUThread(Core::System& system, Common::UniqueBuffer<u8>& buffer);
++bool LoadFromBufferOnCPUThread(Core::System& system, std::span<u8> buffer);
++
+ void LoadLastSaved(Core::System& system, int i = 1);
+ void SaveFirstSaved(Core::System& system);
+ void UndoSaveState(Core::System& system);
 diff --git a/Source/Core/DolphinNoGUI/RetroParkDolphin.vcxproj b/Source/Core/DolphinNoGUI/RetroParkDolphin.vcxproj
 new file mode 100644
 index 0000000000..ee309235fb
@@ -76,10 +148,10 @@ index 0000000000..ee309235fb
 +</Project>
 diff --git a/Source/Core/DolphinNoGUI/rp_dolphin.cpp b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
 new file mode 100644
-index 0000000000..9a9c7c1903
+index 0000000000..6601a26a35
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
-@@ -0,0 +1,621 @@
+@@ -0,0 +1,651 @@
 +// RetroPark: dolphin_present.dll — in-process vehicle. Boots Dolphin NORMAL HEADLESS on Vulkan, and a
 +// copy-from-XFB producer hooks after_present_event: each present it blits Dolphin's just-rendered XFB
 +// image into the host's imported shared VkImage (own command buffer + QFOT release + timeline signal,
@@ -109,7 +181,10 @@ index 0000000000..9a9c7c1903
 +#include "Core/Config/MainSettings.h"
 +#include "Core/Core.h"
 +#include "Core/Host.h"
++#include "Core/State.h"
 +#include "Core/System.h"
++
++#include "Common/Buffer.h"
 +
 +#include "UICommon/UICommon.h"
 +
@@ -694,10 +769,37 @@ index 0000000000..9a9c7c1903
 +  out->pixel_format = 0;
 +}
 +
++Common::UniqueBuffer<u8> g_state_buf;   // last captured savestate
++size_t g_state_size = 0;                // its actual byte length (buffer may be larger)
++
++size_t dp_serialize_size(rp_core*)
++{
++  if (!g_running.load(std::memory_order_acquire))
++    return 0;   // not booted -> Runtime::save_state reports RP_ERR_UNSUPPORTED
++  g_state_size = State::SaveToBufferOnCPUThread(Core::System::GetInstance(), g_state_buf);
++  return g_state_size;
++}
++rp_result dp_serialize(rp_core*, void* data, size_t size)
++{
++  if (!data || g_state_size == 0 || size < g_state_size)
++    return RP_ERR_BAD_ARG;
++  std::memcpy(data, g_state_buf.data(), g_state_size);   // snapshot captured at the serialize_size call
++  return RP_OK;
++}
++rp_result dp_unserialize(rp_core*, const void* data, size_t size)
++{
++  if (!g_running.load(std::memory_order_acquire) || !data || size == 0)
++    return RP_ERR_BAD_ARG;
++  std::vector<u8> tmp(size);
++  std::memcpy(tmp.data(), data, size);
++  return State::LoadFromBufferOnCPUThread(Core::System::GetInstance(), std::span<u8>(tmp.data(), tmp.size()))
++             ? RP_OK : RP_ERR_INTERNAL;
++}
++
 +const rp_core_abi kAbi = {
-+    RETROPARK_ABI_VERSION, dp_get_info,    dp_create,      dp_destroy, dp_set_surfaces,
-+    dp_start,              dp_stop,        dp_get_av_info, nullptr,    nullptr,
-+    nullptr,               nullptr,        dp_load_content};
++    RETROPARK_ABI_VERSION, dp_get_info,    dp_create,        dp_destroy,   dp_set_surfaces,
++    dp_start,              dp_stop,        dp_get_av_info,   nullptr,      dp_serialize_size,
++    dp_serialize,          dp_unserialize, dp_load_content};
 +}  // namespace
 +
 +extern "C" __declspec(dllexport) const rp_core_abi* rp_get_core_abi(void) { return &kAbi; }
