@@ -29,7 +29,7 @@ two buffer functions and drives them from the vehicle's serialize hooks.
 | Decision | Choice |
 |---|---|
 | Mechanism | **In-memory** via Dolphin's existing `SaveToBuffer`/`LoadFromBuffer` (exposed by a small `State.h`/`.cpp` patch), not temp files. No disk, no compression-format handling. |
-| Threading | The vehicle marshals save/load onto the CPU thread with `Core::RunOnCPUThread` (synchronous) so the snapshot is consistent. |
+| Threading | The public wrappers run the save/load **on the CPU thread** via `Core::RunOnCPUThread` (matching Dolphin's own `State::SaveAs`/`Load`) and **wait for completion** with a promise/future — `RunOnCPUThread` is fire-and-forget, so the wait is what makes our serialize synchronous and the snapshot consistent. |
 | Size protocol | `dp_serialize_size` performs the save into an internal `g_state_buf` and returns its size; `dp_serialize` memcpys that captured buffer. This is an **atomic snapshot** taken at the size call (the Runtime always calls `serialize_size()` immediately before `serialize()`). |
 | Runtime | **Unchanged** — `save_state`/`load_state` already work for any serialize-capable core. |
 | ABI | **No change** (serialize hooks exist since Slice F; ABI stays v5). |
@@ -69,11 +69,14 @@ two buffer functions and drives them from the vehicle's serialize hooks.
 `serialize_size` already exist and are core-type-agnostic (gated only on `serialize_size() > 0`). Nothing
 to change; dolphin_present reporting a non-zero size lights them up.
 
-### Harness — F5/F7 for Dolphin (`harness/windowed/main.cpp`)
-- The harness already binds F5=save / F7=load for driven cores (buffer sized via
-  `rp_runtime_serialize_size`). Extend the handler so a presenting core (Dolphin) saves/loads too — the
-  same `rp_runtime_serialize_size` + `rp_runtime_save_state`/`load_state` calls; just remove/relax any
-  driven-only gating in the harness key handler. Human proof: save mid-game, play on, restore.
+### Harness — load Dolphin, so F5/F7 apply (`harness/windowed/main.cpp`)
+- The F5=save / F7=load key handler is **already generic** (`rp_runtime_serialize_size` +
+  `rp_runtime_save_state`/`load_state`, not driven-gated). The gap is that the harness can only load the
+  built-in refcores (chosen by `--driven`/default) — there's no way to load `dolphin_present`. Add a
+  minimal **`--core <dir>`** flag: when present, `rp_runtime_load_core(<dir>)` that directory (a Vulkan
+  presenting core) and `--content <iso>` feeds it the ROM — so the harness can run Dolphin, and F5/F7 then
+  save/load it unchanged. This also lets the user hand-verify Dolphin input/audio (the Slice-M residual).
+  Human proof: `--api vulkan --core <dolphin dir> --content <iso>`, play, F5 save, play on, F7 restore.
 
 ## 2. Data flow
 
