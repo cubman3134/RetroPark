@@ -182,12 +182,57 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, 640, 480,
         nullptr, nullptr, hInst, nullptr);
 
+    // Dolphin netplay (Slice O): the vehicle exposes its own built-in netplay via C exports on
+    // dolphin_present.dll. These are resolved only on the --core path (and only if a netplay flag is set);
+    // the refcore/driven/content lockstep+rollback netplay below is a completely separate mechanism.
+    using np_start_fn  = int (*)();
+    using np_status_fn = void (*)(int*, int*, int*, uint32_t*);
+    np_start_fn  dp_np_start  = nullptr;   // host calls this once the joiner connects (see message loop)
+    np_status_fn dp_np_status = nullptr;
+    bool dolphin_netplay_host = false;     // this machine hosts Dolphin netplay and still owes a start()
+
     g_rt = rp_runtime_create(api, hwnd);
     if (!custom_core_dir.empty()) {
         // Arbitrary Vulkan presenting core (e.g. dolphin_present). --content feeds it the ROM; F5/F7 then
         // save/load it via the already-generic key handler.
         rp_runtime_resize(g_rt, 640, 480);
         rp_runtime_load_core(g_rt, custom_core_dir.c_str());
+        // Dolphin netplay wiring (--core path only). The Runtime already loaded dolphin_present.dll; a
+        // LoadLibraryExA on the same path just returns a (refcounted) handle so we can GetProcAddress the
+        // netplay exports. Both peers arm the identical ROM first (each builds the same SyncIdentifier),
+        // then host()/join(); the host defers start() to the message loop, once the joiner has connected.
+        if ((netplay_host_flag || netplay_join_flag) && use_content) {
+            std::string dll = custom_core_dir + "\\dolphin_present.dll";
+            HMODULE core = LoadLibraryExA(dll.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+            using np_arm_fn  = int (*)(const char*);
+            using np_host_fn = int (*)(uint16_t);
+            using np_join_fn = int (*)(const char*, uint16_t);
+            np_arm_fn  np_arm  = core ? (np_arm_fn)GetProcAddress(core, "rp_dolphin_netplay_arm")   : nullptr;
+            np_host_fn np_host = core ? (np_host_fn)GetProcAddress(core, "rp_dolphin_netplay_host")  : nullptr;
+            np_join_fn np_join = core ? (np_join_fn)GetProcAddress(core, "rp_dolphin_netplay_join")  : nullptr;
+            dp_np_start        = core ? (np_start_fn)GetProcAddress(core, "rp_dolphin_netplay_start") : nullptr;
+            dp_np_status       = core ? (np_status_fn)GetProcAddress(core, "rp_dolphin_netplay_status") : nullptr;
+            if (np_arm && np_host && np_join && dp_np_start && dp_np_status) {
+                np_arm(content_path.c_str());
+                if (netplay_host_flag) {
+                    if (np_host(netplay_port) == 0) {
+                        dolphin_netplay_host = true;
+                        printf("[harness] dolphin netplay: hosting on port %u, waiting for a peer...\n", netplay_port);
+                    } else {
+                        printf("[harness] dolphin netplay: host(%u) failed\n", netplay_port);
+                    }
+                } else {
+                    int jr = np_join(netplay_ip.c_str(), netplay_port);
+                    printf("[harness] dolphin netplay: join %s:%u -> %s\n", netplay_ip.c_str(),
+                           netplay_port, jr == 0 ? "connected" : "failed");
+                }
+                fflush(stdout);
+            } else {
+                printf("[harness] dolphin netplay: could not resolve rp_dolphin_netplay_* exports on %s\n",
+                       dll.c_str());
+                fflush(stdout);
+            }
+        }
         if (use_content) rp_runtime_load_content(g_rt, content_path.c_str());
     } else if (use_content) {
         rp_runtime_resize(g_rt, 256, 240);   // NES resolution
@@ -232,7 +277,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
             content_hash = rp::net::crc32(rom_bytes.data(), rom_bytes.size());
         }
     }
-    if (netplay_host_flag) {
+    // The refcore lockstep/rollback netplay path (TcpTransport + NetSession) is only for the driven/content
+    // cores. On the --core (Dolphin) path the same flags drove the vehicle's own netplay above, so skip
+    // this block entirely there (custom_core_dir non-empty) and let the present loop run unchanged.
+    if (custom_core_dir.empty() && netplay_host_flag) {
         std::string err;
         rp::Runtime& rt_cpp = *reinterpret_cast<rp::Runtime*>(g_rt);
         if (rp::net::TcpTransport::host(netplay_port, netplay_transport, err, 30000) != RP_OK) {
@@ -254,7 +302,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         }
         netplay = true;
         fflush(stdout);
-    } else if (netplay_join_flag) {
+    } else if (custom_core_dir.empty() && netplay_join_flag) {
         std::string err;
         rp::Runtime& rt_cpp = *reinterpret_cast<rp::Runtime*>(g_rt);
         if (rp::net::TcpTransport::join(netplay_ip.c_str(), netplay_port, netplay_transport, err) != RP_OK) {
@@ -284,6 +332,19 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) { running = false; break; }
             TranslateMessage(&msg); DispatchMessage(&msg);
+        }
+        // Dolphin netplay host: once the joiner has connected (players>=2), start the game exactly once.
+        // Both peers then receive Dolphin's StartGame and boot; the normal present branch below shows the
+        // frames the vehicle produces. One-shot — clear the flag so start() is not re-issued every frame.
+        if (dolphin_netplay_host && dp_np_status && dp_np_start) {
+            int c = 0, s = 0, d = 0; uint32_t players = 0;
+            dp_np_status(&c, &s, &d, &players);
+            if (players >= 2) {
+                int sr = dp_np_start();
+                printf("[harness] dolphin netplay: peer connected (players=%u), start() -> %d\n", players, sr);
+                fflush(stdout);
+                dolphin_netplay_host = false;
+            }
         }
         if (netplay && rollback_flag) {
             rp_input_state local = read_local_input();
