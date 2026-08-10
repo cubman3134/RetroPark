@@ -72,10 +72,10 @@ index 1c4eeb0554..a42056d4c3 100644
  void UndoSaveState(Core::System& system);
 diff --git a/Source/Core/DolphinNoGUI/RetroParkDolphin.vcxproj b/Source/Core/DolphinNoGUI/RetroParkDolphin.vcxproj
 new file mode 100644
-index 0000000000..ee309235fb
+index 0000000000..0b594408b1
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/RetroParkDolphin.vcxproj
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,72 @@
 +<?xml version="1.0" encoding="utf-8"?>
 +<!-- RetroPark: builds dolphin_present.dll (in-process external-present vehicle). Not upstream Dolphin. -->
 +<Project>
@@ -129,6 +129,8 @@ index 0000000000..ee309235fb
 +  <Import Project="$(ExternalsDir)cpp-optparse\exports.props" />
 +  <Import Project="$(ExternalsDir)fmt\exports.props" />
 +  <Import Project="$(ExternalsDir)glslang\exports.props" />
++  <Import Project="$(ExternalsDir)SFML\exports.props" />
++  <Import Project="$(ExternalsDir)enet\exports.props" />
 +  <ItemGroup>
 +    <ClCompile Include="rp_dolphin.cpp" />
 +  </ItemGroup>
@@ -148,10 +150,10 @@ index 0000000000..ee309235fb
 +</Project>
 diff --git a/Source/Core/DolphinNoGUI/rp_dolphin.cpp b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
 new file mode 100644
-index 0000000000..6fe6a5ff17
+index 0000000000..37492971d5
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
-@@ -0,0 +1,663 @@
+@@ -0,0 +1,812 @@
 +// RetroPark: dolphin_present.dll — in-process vehicle. Boots Dolphin NORMAL HEADLESS on Vulkan, and a
 +// copy-from-XFB producer hooks after_present_event: each present it blits Dolphin's just-rendered XFB
 +// image into the host's imported shared VkImage (own command buffer + QFOT release + timeline signal,
@@ -183,6 +185,11 @@ index 0000000000..6fe6a5ff17
 +#include "Core/Host.h"
 +#include "Core/State.h"
 +#include "Core/System.h"
++
++#include "Core/NetPlayServer.h"
++#include "Core/NetPlayClient.h"
++#include "Core/NetPlayProto.h"
++#include "UICommon/GameFile.h"
 +
 +#include "Common/Buffer.h"
 +
@@ -676,6 +683,150 @@ index 0000000000..6fe6a5ff17
 +  g_state_buf = {};
 +}
 +}  // namespace
++
++// ---- Slice O: RetroPark drives Dolphin's OWN built-in netplay (headless). ----
++// A headless NetPlayUI (mirrors DolphinQt/NetPlay/NetPlayDialog.cpp behaviors, but no Qt): the
++// display/chat/digest/GBA/Wii-sync methods are no-ops; the connection/state callbacks update atomic
++// flags the vehicle exposes via rp_dolphin_netplay_status. Task 1 only CONNECTs peers — BootGame /
++// OnMsgStartGame / FindGameFile get minimal placeholder bodies (Task 2 implements the boot flow).
++namespace
++{
++std::atomic<int> g_np_connected{0}, g_np_started{0}, g_np_desynced{0};
++std::atomic<uint32_t> g_np_players{0};
++
++std::unique_ptr<NetPlay::NetPlayServer> g_netplay_server;
++std::unique_ptr<NetPlay::NetPlayClient> g_netplay_client;
++
++class RpNetPlayUI final : public NetPlay::NetPlayUI
++{
++public:
++  void BootGame(const std::string& /*filename*/,
++                std::unique_ptr<BootSessionData> /*boot_session_data*/) override {}  // Task 2
++  void StopGame() override {}
++  bool IsHosting() const override { return g_netplay_server != nullptr; }
++
++  void Update() override {}
++  void AppendChat(const std::string&) override {}
++
++  void OnMsgChangeGame(const NetPlay::SyncIdentifier& id, const std::string&) override
++  {
++    m_current_id = id;
++  }
++  void OnMsgChangeGBARom(int, const NetPlay::GBAConfig&) override {}
++  void OnMsgStartGame() override {}  // Task 2
++  void OnMsgStopGame() override {}
++  void OnMsgPowerButton() override {}
++  void OnPlayerConnect(const std::string&) override { g_np_players.fetch_add(1); }
++  void OnPlayerDisconnect(const std::string&) override
++  {
++    if (g_np_players.load() > 0)
++      g_np_players.fetch_sub(1);
++  }
++  void OnPadBufferChanged(u32) override {}
++  void OnHostInputAuthorityChanged(bool) override {}
++  void OnDesync(u32, const std::string&) override { g_np_desynced.store(1); }
++  void OnConnectionLost() override { g_np_connected.store(0); }
++  void OnConnectionError(const std::string&) override {}
++  void OnTraversalError(Common::TraversalClient::FailureReason) override {}
++  void OnTraversalStateChanged(Common::TraversalClient::State) override {}
++  void OnGameStartAborted() override {}
++  void OnGolferChanged(bool, const std::string&) override {}
++  void OnTtlDetermined(u8) override {}
++
++  bool IsRecording() override { return false; }
++  std::shared_ptr<const UICommon::GameFile>
++  FindGameFile(const NetPlay::SyncIdentifier&, NetPlay::SyncIdentifierComparison*) override
++  {
++    return nullptr;  // Task 2
++  }
++  std::string FindGBARomPath(const std::array<u8, 20>&, std::string_view, int) override { return {}; }
++  void ShowGameDigestDialog(const std::string&) override {}
++  void SetGameDigestProgress(int, int) override {}
++  void SetGameDigestResult(int, const std::string&) override {}
++  void AbortGameDigest() override {}
++
++  void OnIndexAdded(bool, std::string) override {}
++  void OnIndexRefreshFailed(std::string) override {}
++
++  void ShowChunkedProgressDialog(const std::string&, u64, std::span<const int>) override {}
++  void HideChunkedProgressDialog() override {}
++  void SetChunkedProgress(int, u64) override {}
++
++  void SetHostWiiSyncData(std::vector<u64>, std::string) override {}
++
++  NetPlay::SyncIdentifier m_current_id{};
++};
++
++RpNetPlayUI g_netplay_ui;
++}  // namespace
++
++extern "C"
++{
++  __declspec(dllexport) int rp_dolphin_netplay_host(uint16_t port)
++  {
++    g_netplay_server = std::make_unique<NetPlay::NetPlayServer>(
++        port, /*forward_port=*/false, &g_netplay_ui, NetPlay::NetTraversalConfig{});
++    if (!g_netplay_server || !g_netplay_server->is_connected)
++    {
++      g_netplay_server.reset();
++      return 1;
++    }
++    // Mirror DolphinQt: hosting also runs a local client connected to the server over loopback. The
++    // client is what carries the player list (NetPlayServer notifies no UI directly — OnPlayerConnect
++    // fires on the CLIENT), so the host must be a participant to observe the joiner. rp_..._status
++    // reads the live count from this client's GetPlayers().
++    g_netplay_client = std::make_unique<NetPlay::NetPlayClient>(
++        std::string("127.0.0.1"), port, &g_netplay_ui, "player1", NetPlay::NetTraversalConfig{});
++    if (!g_netplay_client || !g_netplay_client->IsConnected())
++    {
++      g_netplay_client.reset();
++      g_netplay_server.reset();
++      return 1;
++    }
++    g_np_connected.store(1);
++    return 0;
++  }
++
++  __declspec(dllexport) int rp_dolphin_netplay_join(const char* ip, uint16_t port)
++  {
++    g_netplay_client = std::make_unique<NetPlay::NetPlayClient>(
++        std::string(ip ? ip : ""), port, &g_netplay_ui, "player2", NetPlay::NetTraversalConfig{});
++    if (!g_netplay_client)
++      return 1;
++    const bool connected = g_netplay_client->IsConnected();
++    g_np_connected.store(connected ? 1 : 0);
++    return connected ? 0 : 1;
++  }
++
++  __declspec(dllexport) void rp_dolphin_netplay_status(int* c, int* s, int* d, uint32_t* p)
++  {
++    uint32_t players = 0;
++    if (g_netplay_client)
++    {
++      g_np_connected.store(g_netplay_client->IsConnected() ? 1 : 0);
++      players = static_cast<uint32_t>(g_netplay_client->GetPlayers().size());
++    }
++    g_np_players.store(players);
++    if (c)
++      *c = g_np_connected.load();
++    if (s)
++      *s = g_np_started.load();
++    if (d)
++      *d = g_np_desynced.load();
++    if (p)
++      *p = players;
++  }
++
++  __declspec(dllexport) void rp_dolphin_netplay_stop()
++  {
++    g_netplay_client.reset();
++    g_netplay_server.reset();
++    g_np_connected.store(0);
++    g_np_started.store(0);
++    g_np_desynced.store(0);
++    g_np_players.store(0);
++  }
++}
 +
 +// ---- Slice J direct-handoff C API (used by the standalone test). ----
 +extern "C"
