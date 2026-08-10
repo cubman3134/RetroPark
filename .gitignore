@@ -7,4 +7,5 @@
 *.ilk
 external/libretro-cores/
 external/dolphin/
+external/rpcs3/
 *.nes
