@@ -150,10 +150,10 @@ index 0000000000..0b594408b1
 +</Project>
 diff --git a/Source/Core/DolphinNoGUI/rp_dolphin.cpp b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
 new file mode 100644
-index 0000000000..37492971d5
+index 0000000000..4e1c7194d0
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
-@@ -0,0 +1,812 @@
+@@ -0,0 +1,976 @@
 +// RetroPark: dolphin_present.dll — in-process vehicle. Boots Dolphin NORMAL HEADLESS on Vulkan, and a
 +// copy-from-XFB producer hooks after_present_event: each present it blits Dolphin's just-rendered XFB
 +// image into the host's imported shared VkImage (own command buffer + QFOT release + timeline signal,
@@ -161,9 +161,11 @@ index 0000000000..37492971d5
 +
 +#include <algorithm>
 +#include <atomic>
++#include <condition_variable>
 +#include <cstdint>
 +#include <cstring>
 +#include <memory>
++#include <mutex>
 +#include <string>
 +#include <thread>
 +
@@ -181,6 +183,7 @@ index 0000000000..37492971d5
 +#include "Core/BootManager.h"
 +#include "Core/Config/GraphicsSettings.h"
 +#include "Core/Config/MainSettings.h"
++#include "Core/Config/NetplaySettings.h"
 +#include "Core/Core.h"
 +#include "Core/Host.h"
 +#include "Core/State.h"
@@ -492,7 +495,27 @@ index 0000000000..37492971d5
 +Common::UniqueBuffer<u8> g_state_buf;   // last captured savestate
 +size_t g_state_size = 0;                // its actual byte length (buffer may be larger)
 +
-+void HostThread(std::string rom, std::string user_dir)
++// ---- Slice O netplay boot seam (shared with the netplay section further down in this TU). ----
++// Netplay boots on a thread that owns the hidden window/WSI — the same HostThread that a normal boot
++// uses. But under netplay the game to boot (and the net-synced BootSessionData) is handed to us by the
++// NetPlayClient's StartGame flow, not chosen up front. So a netplay-armed HostThread does all the usual
++// window/config/hook setup and then WAITS for BootGame to post a RpBootRequest, mirroring how the Qt
++// dialog's m_start_game_callback bridges NetPlayUI::BootGame to the boot. These live above HostThread so
++// it can reference them; they are visible to the netplay UI/exports below (same translation unit).
++std::atomic<int> g_np_started{0};        // set to 1 only AFTER a netplay BootCore succeeds (honest signal)
++std::atomic<bool> g_netplay_armed{false};
++std::atomic<bool> g_np_host_ready{false};// HostThread finished UICommon::Init + window setup
++std::string g_netplay_rom;               // the ROM both peers were armed with (identical path on both)
++struct RpBootRequest
++{
++  std::string filename;
++  std::unique_ptr<BootSessionData> bsd;
++};
++std::mutex g_boot_mutex;
++std::condition_variable g_boot_cv;
++std::optional<RpBootRequest> g_boot_request;   // posted by BootGame, consumed by the netplay HostThread
++
++void HostThread(std::string rom, std::string user_dir, bool netplay)
 +{
 +  // No modal dialogs: a no-op alert handler (returns "proceed") intercepts every panic regardless of
 +  // timing, so nothing blocks the run.
@@ -523,11 +546,26 @@ index 0000000000..37492971d5
 +  Config::SetBaseOrCurrent(Config::MAIN_SKIP_IPL, true);
 +  Config::SetBaseOrCurrent(Config::MAIN_FAST_DISC_SPEED, true);
 +
++  if (netplay)
++  {
++    // Headless netplay has no game list / memory-card sync UI, so disable the save + cheat-code sync
++    // handshakes: with these off, the host's RequestStartGame starts the game immediately instead of
++    // deferring on a data-sync round-trip. Determinism is unaffected — both peers boot from the same
++    // net-synced NetSettings, and both run this identical config, so timebases stay in lockstep.
++    Config::SetBaseOrCurrent(Config::NETPLAY_SAVEDATA_LOAD, false);
++    Config::SetBaseOrCurrent(Config::NETPLAY_SYNC_CODES, false);
++  }
++
 +  // Create a HIDDEN Win32 window so Dolphin's present path runs (fires after_present_event + populates
 +  // the current XFB) — pure headless skips presentation entirely, so the XFB is never available there.
 +  // The window is never shown; Dolphin's own swapchain presents to it invisibly, and our producer
 +  // copies the XFB into the host's shared image.
 +  const auto& ext0 = Vulkan::GetRetroParkExternalPresent();
++  // Netplay boots with no host surfaces (ext disabled) — Dolphin then presents normally into this
++  // hidden window instead of into a shared image. Fall back to a sane window size so the swapchain has
++  // valid dimensions; the game is never visible, we only need its present path to run frames.
++  const int win_w = ext0.width ? (int)ext0.width : 640;
++  const int win_h = ext0.height ? (int)ext0.height : 480;
 +  static const wchar_t* kClass = L"RetroParkDolphinHidden";
 +  WNDCLASSEXW wc = {};
 +  wc.cbSize = sizeof(wc);
@@ -537,21 +575,50 @@ index 0000000000..37492971d5
 +  RegisterClassExW(&wc);
 +  // WS_POPUP (no chrome), positioned off-screen and never shown — only a surface for Dolphin's
 +  // swapchain so its present path runs; the game is never visible in it.
-+  HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, kClass, L"", WS_POPUP, -32000, -32000, (int)ext0.width,
-+                              (int)ext0.height, nullptr, nullptr, wc.hInstance, nullptr);
++  HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, kClass, L"", WS_POPUP, -32000, -32000, win_w, win_h,
++                              nullptr, nullptr, wc.hInstance, nullptr);
 +  ShowWindow(hwnd, SW_HIDE);
 +  const WindowSystemInfo wsi(WindowSystemType::Windows, nullptr, hwnd, hwnd);
 +  UICommon::InitControllers(wsi);
 +
-+  // Blit the XFB into the host's shared image on every present.
-+  g_producer.hook =
-+      GetVideoEvents().after_present_event.Register([](const PresentInfo&) { g_producer.OnPresent(); });
++  // Blit the XFB into the host's shared image on every present. Only when the host actually provided a
++  // shared surface (external-present enabled); netplay runs with no surfaces, so the producer would
++  // have no image to import (0x0 / null handle) — skip it and let Dolphin present into the hidden window.
++  if (ext0.enabled)
++    g_producer.hook = GetVideoEvents().after_present_event.Register(
++        [](const PresentInfo&) { g_producer.OnPresent(); });
 +
 +  auto& system = Core::System::GetInstance();
-+  auto boot = BootParameters::GenerateFromFile(
-+      rom, BootSessionData(std::nullopt, DeleteSavestateAfterBoot::No));
++
++  std::unique_ptr<BootParameters> boot;
++  if (netplay)
++  {
++    // Window/config/hook are up; let the arming side (and GameFile/SetupNetSettings) proceed, then wait
++    // for Dolphin's netplay StartGame flow to hand us the ROM + net-synced BootSessionData via BootGame.
++    g_np_host_ready.store(true, std::memory_order_release);
++    std::unique_lock<std::mutex> lk(g_boot_mutex);
++    g_boot_cv.wait(lk, [] {
++      return g_boot_request.has_value() || !g_running.load(std::memory_order_acquire);
++    });
++    if (g_boot_request.has_value())
++    {
++      RpBootRequest req = std::move(*g_boot_request);
++      g_boot_request.reset();
++      lk.unlock();
++      boot = BootParameters::GenerateFromFile(req.filename, std::move(*req.bsd));
++    }
++    // else: stopped before a game was armed — fall through to teardown with a null boot.
++  }
++  else
++  {
++    boot = BootParameters::GenerateFromFile(
++        rom, BootSessionData(std::nullopt, DeleteSavestateAfterBoot::No));
++  }
++
 +  if (boot && BootManager::BootCore(system, std::move(boot), wsi))
 +  {
++    if (netplay)
++      g_np_started.store(1);   // the netplay game actually booted and is now running (honest signal)
 +    // Audio puller (Slice L): NullSound::Init() zeroes the mixer output rate, so latch it back to
 +    // 48 kHz on the first valid SoundStream, then pull ~10 ms chunks of interleaved stereo s16 and
 +    // forward them to the host. Runs only in rp_core mode (rp_host.audio_sample set by dp_set_surfaces);
@@ -668,15 +735,41 @@ index 0000000000..37492971d5
 +  if (g_running.load())
 +    return false;
 +  g_running.store(true, std::memory_order_release);
-+  g_host_thread = std::thread(HostThread, std::move(rom), std::string());
++  g_host_thread = std::thread(HostThread, std::move(rom), std::string(), /*netplay=*/false);
 +  return true;
++}
++
++// Start HostThread in netplay-armed mode: it sets up UICommon/window/config, then blocks until Dolphin's
++// netplay StartGame flow posts a boot request (see the seam above). Blocks until UICommon is ready so the
++// caller can safely create the server/client and build a GameFile from `rom`.
++bool ArmNetplayThread(std::string rom)
++{
++  if (g_running.load())
++    return false;
++  g_netplay_rom = std::move(rom);
++  g_netplay_armed.store(true, std::memory_order_release);
++  g_np_host_ready.store(false, std::memory_order_release);
++  g_running.store(true, std::memory_order_release);
++  g_host_thread = std::thread(HostThread, std::string(), std::string(), /*netplay=*/true);
++  // Wait (bounded) for UICommon::Init + window setup to finish before returning.
++  for (int i = 0; i < 500 && !g_np_host_ready.load(std::memory_order_acquire); ++i)
++    std::this_thread::sleep_for(std::chrono::milliseconds(20));
++  return g_np_host_ready.load(std::memory_order_acquire);
 +}
 +
 +void StopDolphinThread()
 +{
 +  g_running.store(false, std::memory_order_release);
++  // Wake a netplay HostThread that may still be waiting for a boot request (stop before a game armed).
++  {
++    std::lock_guard<std::mutex> lk(g_boot_mutex);
++    g_boot_request.reset();
++  }
++  g_boot_cv.notify_all();
 +  if (g_host_thread.joinable())
 +    g_host_thread.join();
++  g_netplay_armed.store(false, std::memory_order_release);
++  g_np_host_ready.store(false, std::memory_order_release);
 +  // Drop the last snapshot so a stop->start of a different game can't hand back the previous game's
 +  // state; also frees the ~94 MB buffer.
 +  g_state_size = 0;
@@ -691,8 +784,14 @@ index 0000000000..37492971d5
 +// OnMsgStartGame / FindGameFile get minimal placeholder bodies (Task 2 implements the boot flow).
 +namespace
 +{
-+std::atomic<int> g_np_connected{0}, g_np_started{0}, g_np_desynced{0};
++std::atomic<int> g_np_connected{0}, g_np_desynced{0};   // g_np_started lives in the boot seam above
 +std::atomic<uint32_t> g_np_players{0};
++
++// Guards the server/client unique_ptrs. Netplay boot introduces the emulation/CPU + client network
++// threads, so rp_dolphin_netplay_status (test/main thread) must not read g_netplay_client while
++// rp_dolphin_netplay_stop tears it down. A plain mutex around the pointer touches is enough; the netplay
++// getters it calls (IsConnected/GetPlayers) don't re-enter this lock.
++std::mutex g_netplay_ptr_mutex;
 +
 +std::unique_ptr<NetPlay::NetPlayServer> g_netplay_server;
 +std::unique_ptr<NetPlay::NetPlayClient> g_netplay_client;
@@ -700,8 +799,20 @@ index 0000000000..37492971d5
 +class RpNetPlayUI final : public NetPlay::NetPlayUI
 +{
 +public:
-+  void BootGame(const std::string& /*filename*/,
-+                std::unique_ptr<BootSessionData> /*boot_session_data*/) override {}  // Task 2
++  // The netplay client hands us the ROM path + a net-synced BootSessionData (its NetSettings already
++  // baked in). We own the window/WSI on HostThread, so — mirroring the Qt dialog's m_start_game_callback
++  // seam — we don't boot here; we post the request and let the netplay-armed HostThread run BootCore.
++  void BootGame(const std::string& filename,
++                std::unique_ptr<BootSessionData> boot_session_data) override
++  {
++    {
++      std::lock_guard<std::mutex> lk(g_boot_mutex);
++      g_boot_request.emplace();
++      g_boot_request->filename = filename;
++      g_boot_request->bsd = std::move(boot_session_data);
++    }
++    g_boot_cv.notify_all();
++  }
 +  void StopGame() override {}
 +  bool IsHosting() const override { return g_netplay_server != nullptr; }
 +
@@ -713,7 +824,16 @@ index 0000000000..37492971d5
 +    m_current_id = id;
 +  }
 +  void OnMsgChangeGBARom(int, const NetPlay::GBAConfig&) override {}
-+  void OnMsgStartGame() override {}  // Task 2
++  // Server signalled game start. Mirror NetPlayDialog::OnMsgStartGame: kick the client's StartGame, which
++  // builds the net-synced BootSessionData and calls our BootGame. Runs on the client's network thread.
++  void OnMsgStartGame() override
++  {
++    if (g_netplay_client)
++    {
++      if (const auto game = FindGameFile(m_current_id, nullptr))
++        g_netplay_client->StartGame(game->GetFilePath());
++    }
++  }
 +  void OnMsgStopGame() override {}
 +  void OnMsgPowerButton() override {}
 +  void OnPlayerConnect(const std::string&) override { g_np_players.fetch_add(1); }
@@ -734,10 +854,20 @@ index 0000000000..37492971d5
 +  void OnTtlDetermined(u8) override {}
 +
 +  bool IsRecording() override { return false; }
++  // Headless has no game list to search; both peers armed the identical ROM path (g_netplay_rom), so we
++  // build the GameFile straight from it. The optional comparison lets callers (e.g. the host's
++  // SetupNetSettings) confirm it matches the requested SyncIdentifier.
 +  std::shared_ptr<const UICommon::GameFile>
-+  FindGameFile(const NetPlay::SyncIdentifier&, NetPlay::SyncIdentifierComparison*) override
++  FindGameFile(const NetPlay::SyncIdentifier& id, NetPlay::SyncIdentifierComparison* cmp) override
 +  {
-+    return nullptr;  // Task 2
++    if (g_netplay_rom.empty())
++      return nullptr;
++    auto game = std::make_shared<UICommon::GameFile>(g_netplay_rom);
++    if (!game->IsValid())
++      return nullptr;
++    if (cmp)
++      *cmp = game->CompareSyncIdentifier(id);
++    return game;
 +  }
 +  std::string FindGBARomPath(const std::array<u8, 20>&, std::string_view, int) override { return {}; }
 +  void ShowGameDigestDialog(const std::string&) override {}
@@ -762,8 +892,17 @@ index 0000000000..37492971d5
 +
 +extern "C"
 +{
++  // Arm netplay: record the local ROM and start the netplay-armed HostThread (which will wait for the
++  // netplay StartGame flow to boot it). Both host and joiner call this before host()/join(); the ROM path
++  // is identical on both peers, so both build the same SyncIdentifier and boot the same game.
++  __declspec(dllexport) int rp_dolphin_netplay_arm(const char* rom)
++  {
++    return ArmNetplayThread(std::string(rom ? rom : "")) ? 0 : 1;
++  }
++
 +  __declspec(dllexport) int rp_dolphin_netplay_host(uint16_t port)
 +  {
++    std::lock_guard<std::mutex> lk(g_netplay_ptr_mutex);
 +    g_netplay_server = std::make_unique<NetPlay::NetPlayServer>(
 +        port, /*forward_port=*/false, &g_netplay_ui, NetPlay::NetTraversalConfig{});
 +    if (!g_netplay_server || !g_netplay_server->is_connected)
@@ -789,6 +928,7 @@ index 0000000000..37492971d5
 +
 +  __declspec(dllexport) int rp_dolphin_netplay_join(const char* ip, uint16_t port)
 +  {
++    std::lock_guard<std::mutex> lk(g_netplay_ptr_mutex);
 +    g_netplay_client = std::make_unique<NetPlay::NetPlayClient>(
 +        std::string(ip ? ip : ""), port, &g_netplay_ui, "player2", NetPlay::NetTraversalConfig{});
 +    if (!g_netplay_client)
@@ -798,13 +938,32 @@ index 0000000000..37492971d5
 +    return connected ? 0 : 1;
 +  }
 +
++  // Host arms the game: identify the ROM by SyncIdentifier and drive Dolphin's own start sequence
++  // (ChangeGame + RequestStartGame). Mirrors NetPlayDialog game-select + OnStart. Both peers then receive
++  // OnMsgStartGame and boot through the bridge above.
++  __declspec(dllexport) int rp_dolphin_netplay_start()
++  {
++    std::lock_guard<std::mutex> lk(g_netplay_ptr_mutex);
++    if (!g_netplay_server)
++      return 1;
++    UICommon::GameFile game(g_netplay_rom);
++    if (!game.IsValid())
++      return 2;
++    if (!g_netplay_server->ChangeGame(game.GetSyncIdentifier(), "netplay"))
++      return 3;
++    return g_netplay_server->RequestStartGame() ? 0 : 4;
++  }
++
 +  __declspec(dllexport) void rp_dolphin_netplay_status(int* c, int* s, int* d, uint32_t* p)
 +  {
 +    uint32_t players = 0;
-+    if (g_netplay_client)
 +    {
-+      g_np_connected.store(g_netplay_client->IsConnected() ? 1 : 0);
-+      players = static_cast<uint32_t>(g_netplay_client->GetPlayers().size());
++      std::lock_guard<std::mutex> lk(g_netplay_ptr_mutex);
++      if (g_netplay_client)
++      {
++        g_np_connected.store(g_netplay_client->IsConnected() ? 1 : 0);
++        players = static_cast<uint32_t>(g_netplay_client->GetPlayers().size());
++      }
 +    }
 +    g_np_players.store(players);
 +    if (c)
@@ -819,6 +978,11 @@ index 0000000000..37492971d5
 +
 +  __declspec(dllexport) void rp_dolphin_netplay_stop()
 +  {
++    // Stop emulation FIRST (joins the netplay HostThread, which runs Core::Stop/Shutdown and disables
++    // netplay on the CPU thread) so the CPU/network threads are no longer using the client when we free
++    // it. StopDolphinThread is a no-op when nothing was armed (e.g. the connect-only test).
++    StopDolphinThread();
++    std::lock_guard<std::mutex> lk(g_netplay_ptr_mutex);
 +    g_netplay_client.reset();
 +    g_netplay_server.reset();
 +    g_np_connected.store(0);
