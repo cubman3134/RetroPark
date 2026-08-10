@@ -23,7 +23,7 @@ bool file_exists(const char* p) { return GetFileAttributesA(p) != INVALID_FILE_A
 
 typedef int (*host_fn)(uint16_t);
 typedef int (*join_fn)(const char*, uint16_t);
-typedef void (*status_fn)(int*, int*, int*, uint32_t*);
+typedef void (*status_fn)(int*, int*, int*, uint32_t*, uint32_t*);   // + frame-progress counter (Slice O fix)
 typedef void (*stop_fn)();
 typedef int (*arm_fn)(const char*);   // Task 2: set the local ROM + start the netplay-armed host thread
 typedef int (*start_fn)();            // Task 2: host arms the game (ChangeGame + RequestStartGame)
@@ -54,10 +54,10 @@ TEST_CASE("dolphin netplay: two processes connect over loopback (gated)") {
         // Child = joiner. Connect to the host, wait to be connected, exit(0) on success / exit(2) on fail.
         NetApi a = load_net();
         int rc = a.join("127.0.0.1", kPort);
-        int connected = 0, started = 0, desynced = 0; uint32_t players = 0;
+        int connected = 0, started = 0, desynced = 0; uint32_t players = 0, frame = 0;
         for (int i = 0; i < 100 && !connected; ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            a.status(&connected, &started, &desynced, &players);
+            a.status(&connected, &started, &desynced, &players, &frame);
         }
         a.stop();
         std::exit((rc == 0 && connected) ? 0 : 2);
@@ -76,10 +76,10 @@ TEST_CASE("dolphin netplay: two processes connect over loopback (gated)") {
     SetEnvironmentVariableA("RP_NETPLAY_ROLE", nullptr);
     REQUIRE(ok);
 
-    int connected = 0, started = 0, desynced = 0; uint32_t players = 0;
+    int connected = 0, started = 0, desynced = 0; uint32_t players = 0, frame = 0;
     for (int i = 0; i < 100 && players < 2; ++i) {   // host sees itself + the joiner
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        a.status(&connected, &started, &desynced, &players);
+        a.status(&connected, &started, &desynced, &players, &frame);
     }
     CHECK(players >= 2);
 
@@ -107,22 +107,31 @@ TEST_CASE("dolphin netplay: two processes boot in sync and stay desync-free (gat
     // A poll helper: returns once `started` is seen (or the deadline lapses); flips `desynced` if the
     // server ever reports a desync during the wait. ~90s budget covers the two ~40s netplay boots.
     auto wait_started = [](NetApi& a, bool& started, bool& desynced, int max_polls) {
-        int c = 0, s = 0, d = 0; uint32_t p = 0;
+        int c = 0, s = 0, d = 0; uint32_t p = 0, f = 0;
         for (int i = 0; i < max_polls && !started; ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            a.status(&c, &s, &d, &p);
+            a.status(&c, &s, &d, &p, &f);
             if (s) started = true;
             if (d) desynced = true;
         }
     };
     // Watch a running game for a fixed window, asserting the desync flag stays clear the whole time.
     auto watch_desync = [](NetApi& a, bool& desynced, int polls) {
-        int c = 0, s = 0, d = 0; uint32_t p = 0;
+        int c = 0, s = 0, d = 0; uint32_t p = 0, f = 0;
         for (int i = 0; i < polls; ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            a.status(&c, &s, &d, &p);
+            a.status(&c, &s, &d, &p, &f);
             if (d) desynced = true;
         }
+    };
+    // Sample the presented-frame counter (frame-progress proof). If netplay input exchange broke, both
+    // CPU threads block in GetNetPads at frame ~0 -> no frames present -> this never advances -> the
+    // desync comparison never runs and desynced==0 would pass VACUOUSLY on two frozen games. Asserting
+    // strict advance closes that hole.
+    auto sample_frame = [](NetApi& a) -> uint32_t {
+        int c = 0, s = 0, d = 0; uint32_t p = 0, f = 0;
+        a.status(&c, &s, &d, &p, &f);
+        return f;
     };
 
     if (std::getenv("RP_NETPLAY_ROLE")) {
@@ -132,16 +141,22 @@ TEST_CASE("dolphin netplay: two processes boot in sync and stay desync-free (gat
         if (!arm) std::exit(3);                       // Task-2 export missing (red)
         if (arm(kRom) != 0) std::exit(4);
         int rc = a.join("127.0.0.1", kPort2);
-        int c = 0, s = 0, d = 0; uint32_t p = 0;
+        int c = 0, s = 0, d = 0; uint32_t p = 0, f = 0;
         for (int i = 0; i < 100 && !c; ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            a.status(&c, &s, &d, &p);
+            a.status(&c, &s, &d, &p, &f);
         }
         bool started = false, desynced = false;
         wait_started(a, started, desynced, 900);      // up to ~90s for the netplay boot
-        if (started) watch_desync(a, desynced, 100);  // ~10s running, desync-free
+        bool frames_advanced = false;
+        if (started) {
+            uint32_t frame_start = sample_frame(a);
+            watch_desync(a, desynced, 100);           // ~10s running, desync-free
+            uint32_t frame_end = sample_frame(a);
+            frames_advanced = (frame_end > frame_start + 10);   // frames actually ADVANCED, not frozen
+        }
         a.stop();
-        std::exit((rc == 0 && started && !desynced) ? 0 : 2);
+        std::exit((rc == 0 && started && !desynced && frames_advanced) ? 0 : 2);
     }
 
     // Parent = host.
@@ -162,10 +177,10 @@ TEST_CASE("dolphin netplay: two processes boot in sync and stay desync-free (gat
     REQUIRE(ok);
 
     // Wait for the joiner to connect (host sees itself + the joiner), then arm the game.
-    int c = 0, s = 0, d = 0; uint32_t p = 0;
+    int c = 0, s = 0, d = 0; uint32_t p = 0, f = 0;
     for (int i = 0; i < 100 && p < 2; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        a.status(&c, &s, &d, &p);
+        a.status(&c, &s, &d, &p, &f);
     }
     REQUIRE(p >= 2);
     REQUIRE(start() == 0);                            // host: ChangeGame + RequestStartGame
@@ -173,8 +188,14 @@ TEST_CASE("dolphin netplay: two processes boot in sync and stay desync-free (gat
     bool started = false, desynced = false;
     wait_started(a, started, desynced, 900);          // up to ~90s for our own netplay boot
     CHECK(started);                                   // the game actually booted + is running
-    if (started) watch_desync(a, desynced, 100);      // ~10s running, desync-free
+    uint32_t frame_start = 0, frame_end = 0;
+    if (started) {
+        frame_start = sample_frame(a);
+        watch_desync(a, desynced, 100);               // ~10s running, desync-free
+        frame_end = sample_frame(a);
+    }
     CHECK(!desynced);                                 // server saw no timebase divergence
+    CHECK(frame_end > frame_start + 10);              // frames actually ADVANCED (not a frozen game)
 
     WaitForSingleObject(pi.hProcess, 180000);
     DWORD child_rc = 1; GetExitCodeProcess(pi.hProcess, &child_rc);

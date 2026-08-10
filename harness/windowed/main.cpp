@@ -186,7 +186,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     // dolphin_present.dll. These are resolved only on the --core path (and only if a netplay flag is set);
     // the refcore/driven/content lockstep+rollback netplay below is a completely separate mechanism.
     using np_start_fn  = int (*)();
-    using np_status_fn = void (*)(int*, int*, int*, uint32_t*);
+    using np_status_fn = void (*)(int*, int*, int*, uint32_t*, uint32_t*);   // + frame-progress counter
     np_start_fn  dp_np_start  = nullptr;   // host calls this once the joiner connects (see message loop)
     np_status_fn dp_np_status = nullptr;
     bool dolphin_netplay_host = false;     // this machine hosts Dolphin netplay and still owes a start()
@@ -337,8 +337,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         // Both peers then receive Dolphin's StartGame and boot; the normal present branch below shows the
         // frames the vehicle produces. One-shot — clear the flag so start() is not re-issued every frame.
         if (dolphin_netplay_host && dp_np_status && dp_np_start) {
-            int c = 0, s = 0, d = 0; uint32_t players = 0;
-            dp_np_status(&c, &s, &d, &players);
+            int c = 0, s = 0, d = 0; uint32_t players = 0, frame = 0;
+            dp_np_status(&c, &s, &d, &players, &frame);
             if (players >= 2) {
                 int sr = dp_np_start();
                 printf("[harness] dolphin netplay: peer connected (players=%u), start() -> %d\n", players, sr);

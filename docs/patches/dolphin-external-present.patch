@@ -150,10 +150,10 @@ index 0000000000..0b594408b1
 +</Project>
 diff --git a/Source/Core/DolphinNoGUI/rp_dolphin.cpp b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
 new file mode 100644
-index 0000000000..4e1c7194d0
+index 0000000000..7ee366d4ca
 --- /dev/null
 +++ b/Source/Core/DolphinNoGUI/rp_dolphin.cpp
-@@ -0,0 +1,976 @@
+@@ -0,0 +1,1008 @@
 +// RetroPark: dolphin_present.dll — in-process vehicle. Boots Dolphin NORMAL HEADLESS on Vulkan, and a
 +// copy-from-XFB producer hooks after_present_event: each present it blits Dolphin's just-rendered XFB
 +// image into the host's imported shared VkImage (own command buffer + QFOT release + timeline signal,
@@ -489,6 +489,7 @@ index 0000000000..4e1c7194d0
 +};
 +
 +XfbProducer g_producer;
++Common::EventHook g_np_frame_hook;   // always-on presented-frame counter (netplay frame-progress proof)
 +std::thread g_host_thread;
 +std::atomic<bool> g_running{false};
 +
@@ -503,6 +504,8 @@ index 0000000000..4e1c7194d0
 +// dialog's m_start_game_callback bridges NetPlayUI::BootGame to the boot. These live above HostThread so
 +// it can reference them; they are visible to the netplay UI/exports below (same translation unit).
 +std::atomic<int> g_np_started{0};        // set to 1 only AFTER a netplay BootCore succeeds (honest signal)
++std::atomic<uint32_t> g_np_frame{0};     // presented-frame counter — proves frames actually ADVANCE, not
++                                         // just that boot was initiated (a frozen game reports 0 forever)
 +std::atomic<bool> g_netplay_armed{false};
 +std::atomic<bool> g_np_host_ready{false};// HostThread finished UICommon::Init + window setup
 +std::string g_netplay_rom;               // the ROM both peers were armed with (identical path on both)
@@ -584,6 +587,14 @@ index 0000000000..4e1c7194d0
 +  // Blit the XFB into the host's shared image on every present. Only when the host actually provided a
 +  // shared surface (external-present enabled); netplay runs with no surfaces, so the producer would
 +  // have no image to import (0x0 / null handle) — skip it and let Dolphin present into the hidden window.
++  // Presented-frame counter for the netplay frame-progress proof. The producer's XFB-blit hook below is
++  // gated on a host surface (ext0.enabled), which netplay does NOT have — so register a SEPARATE always-on
++  // hook that ticks once per presented frame in BOTH modes. rp_dolphin_netplay_status reports this so the
++  // gated test can assert both peers actually advance frames: a game frozen on a broken input exchange
++  // presents nothing, turning a vacuous desynced==0 into a real failure.
++  g_np_frame.store(0, std::memory_order_relaxed);
++  g_np_frame_hook = GetVideoEvents().after_present_event.Register(
++      [](const PresentInfo&) { g_np_frame.fetch_add(1, std::memory_order_relaxed); });
 +  if (ext0.enabled)
 +    g_producer.hook = GetVideoEvents().after_present_event.Register(
 +        [](const PresentInfo&) { g_producer.OnPresent(); });
@@ -722,6 +733,7 @@ index 0000000000..4e1c7194d0
 +  }
 +
 +  g_producer.hook.reset();
++  g_np_frame_hook.reset();
 +  if (hwnd)
 +    DestroyWindow(hwnd);
 +  UICommon::ShutdownControllers();
@@ -954,7 +966,8 @@ index 0000000000..4e1c7194d0
 +    return g_netplay_server->RequestStartGame() ? 0 : 4;
 +  }
 +
-+  __declspec(dllexport) void rp_dolphin_netplay_status(int* c, int* s, int* d, uint32_t* p)
++  __declspec(dllexport) void rp_dolphin_netplay_status(int* c, int* s, int* d, uint32_t* p,
++                                                       uint32_t* frame)
 +  {
 +    uint32_t players = 0;
 +    {
@@ -974,13 +987,24 @@ index 0000000000..4e1c7194d0
 +      *d = g_np_desynced.load();
 +    if (p)
 +      *p = players;
++    if (frame)
++      *frame = g_np_frame.load(std::memory_order_relaxed);
 +  }
 +
 +  __declspec(dllexport) void rp_dolphin_netplay_stop()
 +  {
-+    // Stop emulation FIRST (joins the netplay HostThread, which runs Core::Stop/Shutdown and disables
-+    // netplay on the CPU thread) so the CPU/network threads are no longer using the client when we free
-+    // it. StopDolphinThread is a no-op when nothing was armed (e.g. the connect-only test).
++    // Unblock the CPU thread from GetNetPads FIRST: StopGame() tears down the client's net-input pump, so a
++    // CPU thread parked waiting for the next frame's pads wakes cleanly instead of racing StopDolphinThread's
++    // Core::Stop (closes a near-simultaneous-stop hang window). Guarded by the pointer mutex; the emu-thread
++    // join and pointer teardown below keep their existing order.
++    {
++      std::lock_guard<std::mutex> lk(g_netplay_ptr_mutex);
++      if (g_netplay_client)
++        g_netplay_client->StopGame();
++    }
++    // Stop emulation (joins the netplay HostThread, which runs Core::Stop/Shutdown and disables netplay on
++    // the CPU thread) so the CPU/network threads are no longer using the client when we free it.
++    // StopDolphinThread is a no-op when nothing was armed (e.g. the connect-only test).
 +    StopDolphinThread();
 +    std::lock_guard<std::mutex> lk(g_netplay_ptr_mutex);
 +    g_netplay_client.reset();
@@ -989,6 +1013,7 @@ index 0000000000..4e1c7194d0
 +    g_np_started.store(0);
 +    g_np_desynced.store(0);
 +    g_np_players.store(0);
++    g_np_frame.store(0, std::memory_order_relaxed);
 +  }
 +}
 +
@@ -1072,6 +1097,13 @@ index 0000000000..4e1c7194d0
 +  auto* c = reinterpret_cast<DolphinCore*>(core);
 +  if (c->rom.empty())
 +    return RP_ERR_INTERNAL;
++  // Netplay-armed path (harness --core + --netplay-*): rp_dolphin_netplay_arm already started the
++  // netplay HostThread (g_running=true), and the boot is driven by Dolphin's own netplay StartGame ->
++  // BootGame flow — NOT by us. Booting again here would hit BootDolphinThread's "already running" guard,
++  // return an error, and make Runtime::load_content bail BEFORE open_audio (silent session, loader stuck
++  // in Created). Succeed instead so the Runtime proceeds to open_audio and marks the loader Started.
++  if (g_netplay_armed.load(std::memory_order_acquire))
++    return RP_OK;
 +  return BootDolphinThread(c->rom) ? RP_OK : RP_ERR_DEVICE;
 +}
 +rp_result dp_stop(rp_core*)
