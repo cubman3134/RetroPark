@@ -29,6 +29,8 @@ add_library(retropark STATIC
   src/loader/Manifest.cpp
   src/loader/CoreLoader.cpp
   src/loader/Win32CoreModule.cpp
+  src/loader/StaticCoreModule.cpp
+  src/loader/StaticCoreRegistry.cpp
   src/render/SurfaceRing.cpp
   src/render/FramebufferCopy.cpp)
 target_sources(retropark PRIVATE

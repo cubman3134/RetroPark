@@ -36,8 +36,19 @@ add_executable(retropark_tests
   test_dolphin_core_e2e.cpp
   test_xinput_map.cpp
   test_dolphin_savestate_e2e.cpp
-  test_dolphin_netplay_e2e.cpp)
+  test_dolphin_netplay_e2e.cpp
+  test_static_core.cpp)
 target_link_libraries(retropark_tests PRIVATE retropark doctest::doctest nlohmann_json::nlohmann_json retropark_libretro_convert)
+
+# Slice P: statically link refcore_driven into the test binary TWICE with renamed getters, to prove a
+# core loads with no DLL and that two static cores coexist without symbol collision.
+add_library(static_core_a OBJECT ${CMAKE_SOURCE_DIR}/cores/refcore_driven/RefCoreDriven.cpp)
+target_include_directories(static_core_a PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(static_core_a PRIVATE rp_get_core_abi=refcore_driven_static_get_core_abi)
+add_library(static_core_b OBJECT ${CMAKE_SOURCE_DIR}/cores/refcore_driven/RefCoreDriven.cpp)
+target_include_directories(static_core_b PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(static_core_b PRIVATE rp_get_core_abi=refcore_driven_b_static_get_core_abi)
+target_link_libraries(retropark_tests PRIVATE $<TARGET_OBJECTS:static_core_a> $<TARGET_OBJECTS:static_core_b>)
 target_include_directories(retropark_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 set(PROBE_HDR "${CMAKE_CURRENT_BINARY_DIR}/gen/probe_vert_generated.h")
