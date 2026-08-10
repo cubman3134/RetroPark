@@ -3,6 +3,8 @@
 #include "loader/StaticCoreRegistry.h"
 #include "loader/CoreLoader.h"
 #include <retropark/retropark_abi.h>
+#include <retropark/retropark.h>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -47,4 +49,22 @@ TEST_CASE("static core: loads + runs through CoreLoader with no DLL and no GPU")
     REQUIRE(ld.serialize(b.data(), b.size(), err) == RP_OK);
     CHECK(a != b);                                        // the statically-linked core actually ran
     ld.destroy();
+}
+
+TEST_CASE("static core: Runtime loads it by id and drives frames through present (no DLL)") {
+    register_static_test_cores();
+    rp_runtime* rt = rp_runtime_create(RP_GFX_D3D11, nullptr);   // headless WARP, like the driven e2e
+    REQUIRE(rt);
+    REQUIRE(rp_runtime_resize(rt, 64, 64) == RP_OK);
+    CHECK(rp_runtime_load_static_core(rt, "no_such_id") == RP_ERR_NOT_FOUND);
+    REQUIRE(rp_runtime_load_static_core(rt, "refcore_driven") == RP_OK);   // loaded from the registry, no DLL
+    std::vector<uint8_t> img(64 * 64 * 4, 0);
+    bool sawGreen = false;
+    for (int i = 0; i < 60 && !sawGreen; ++i) {
+        if (rp_runtime_present(rt, img.data()) != RP_OK) continue;
+        if (img[((64 - 4) * 64 + (64 - 4)) * 4 + 1] > 150) sawGreen = true;  // core's green (driven e2e check)
+    }
+    CHECK(sawGreen);
+    rp_runtime_unload_core(rt);
+    rp_runtime_destroy(rt);
 }

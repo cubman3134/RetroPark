@@ -8,7 +8,10 @@
 #include <cstdint>
 #include <retropark/retropark.h>
 #include "loader/CoreLoader.h"
+#include "loader/ICoreModule.h"
 #include "loader/Win32CoreModule.h"
+#include "loader/StaticCoreModule.h"
+#include "loader/StaticCoreRegistry.h"
 #include "render/SurfaceRing.h"
 #include "render/IRenderBackend.h"
 #include "audio/IAudioOutput.h"
@@ -19,6 +22,7 @@ public:
     Runtime(rp_graphics_api api, void* native_window);
     ~Runtime();
     rp_result load_core(const std::string& core_dir);
+    rp_result load_static_core(const std::string& core_id);
     rp_result unload_core();
     rp_result load_content(const char* path);
     rp_result resize(uint32_t w, uint32_t h);
@@ -44,12 +48,13 @@ public:
 
 private:
     rp_result rebuild_surfaces(std::string& err);
+    rp_result finish_load_core(rp_core_type type, std::string& err);  // shared post-create logic
     void open_audio(const rp_av_info& av);
 
     void* native_window_ = nullptr;
     rp_graphics_api api_;
     std::unique_ptr<IRenderBackend> backend_;
-    std::unique_ptr<Win32CoreModule> module_;
+    std::unique_ptr<ICoreModule> module_;
     CoreLoader loader_;
     SurfaceRing ring_{3};
     rp_host_iface host_iface_{};

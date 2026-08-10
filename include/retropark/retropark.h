@@ -14,6 +14,10 @@ rp_runtime* rp_runtime_create(rp_graphics_api api, void* native_window);
 void        rp_runtime_destroy(rp_runtime* rt);
 
 rp_result   rp_runtime_load_core(rp_runtime* rt, const char* core_dir);
+/* Load a core that was statically compiled into the app + registered in the StaticCoreRegistry, by its id.
+   No DLL, no filesystem — the static/dynamic split that makes iOS (and any locked-down platform) possible.
+   Metadata (type/graphics_api/abi_version) comes from the core's get_info(). */
+rp_result   rp_runtime_load_static_core(rp_runtime* rt, const char* core_id);
 rp_result   rp_runtime_unload_core(rp_runtime* rt);
 rp_result   rp_runtime_load_content(rp_runtime* rt, const char* path);
 

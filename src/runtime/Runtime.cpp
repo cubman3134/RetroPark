@@ -133,7 +133,9 @@ rp_result Runtime::load_core(const std::string& core_dir) {
     if (m.type == RP_CORE_PRESENTING && m.graphics_api != api_) return RP_ERR_UNSUPPORTED; // presenting core must match runtime's backend api
 
     std::string dll = core_dir + "/" + m.entry;
-    if (Win32CoreModule::open(dll, module_, err) != RP_OK) return RP_ERR_NOT_FOUND;
+    std::unique_ptr<Win32CoreModule> mod;
+    if (Win32CoreModule::open(dll, mod, err) != RP_OK) return RP_ERR_NOT_FOUND;
+    module_ = std::move(mod);
     if (loader_.load(module_.get(), err) != RP_OK) {
         module_.reset();
         return RP_ERR_ABI_MISMATCH;
@@ -143,11 +145,14 @@ rp_result Runtime::load_core(const std::string& core_dir) {
         module_.reset();
         return RP_ERR_INTERNAL;
     }
+    return finish_load_core(m.type, err);   // `m` = the CoreManifest; its .type feeds the shared branch logic
+}
 
+rp_result Runtime::finish_load_core(rp_core_type type, std::string& err) {
     core_loaded_ = true;
-    core_type_ = m.type;
+    core_type_ = type;
 
-    if (core_type_ == RP_CORE_DRIVEN) {
+    if (type == RP_CORE_DRIVEN) {
         requires_content_ = loader_.has_load_content();
         content_loaded_ = false;
         if (!requires_content_) {
@@ -182,6 +187,24 @@ rp_result Runtime::load_core(const std::string& core_dir) {
         }
     }
     return RP_OK;
+}
+
+rp_result Runtime::load_static_core(const std::string& core_id) {
+    if (!init_ok_) return RP_ERR_DEVICE;
+    if (core_loaded_ || loader_.state() != LoaderState::Unloaded) unload_core();
+    rp_get_core_abi_fn getter = StaticCoreRegistry::get(core_id);
+    if (!getter) return RP_ERR_NOT_FOUND;
+    std::string err;
+    module_ = std::make_unique<StaticCoreModule>(getter);
+    if (loader_.load(module_.get(), err) != RP_OK) { module_.reset(); return RP_ERR_ABI_MISMATCH; }
+    rp_core_info info{};
+    if (loader_.abi() && loader_.abi()->get_info) loader_.abi()->get_info(&info);
+    else { loader_.destroy(); module_.reset(); return RP_ERR_INTERNAL; }
+    if (info.type == RP_CORE_PRESENTING && (rp_graphics_api)info.graphics_api != api_) {
+        loader_.destroy(); module_.reset(); return RP_ERR_UNSUPPORTED;   // presenting core must match runtime api
+    }
+    if (loader_.create(&host_iface_, err) != RP_OK) { loader_.destroy(); module_.reset(); return RP_ERR_INTERNAL; }
+    return finish_load_core((rp_core_type)info.type, err);
 }
 
 rp_result Runtime::unload_core() {
@@ -351,6 +374,9 @@ rp_runtime* rp_runtime_create(rp_graphics_api api, void* native_window) {
 void rp_runtime_destroy(rp_runtime* rt) { delete reinterpret_cast<Runtime*>(rt); }
 rp_result rp_runtime_load_core(rp_runtime* rt, const char* dir) {
     return reinterpret_cast<Runtime*>(rt)->load_core(dir ? dir : "");
+}
+rp_result rp_runtime_load_static_core(rp_runtime* rt, const char* core_id) {
+    return reinterpret_cast<Runtime*>(rt)->load_static_core(core_id ? core_id : "");
 }
 rp_result rp_runtime_unload_core(rp_runtime* rt) {
     return reinterpret_cast<Runtime*>(rt)->unload_core();
