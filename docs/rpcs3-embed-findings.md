@@ -1,10 +1,34 @@
 # RPCS3 Embed — Slice I Task 1 findings (linkage) + resume fork
 
 **Date:** 2026-08-10
-**Status:** Task 1 **DONE + verified** (2026-08-11). The fork below was resolved via **Option 1** (match
-RPCS3's expected Qt). `rp_rpcs3_host.exe` links the full `rpcs3_lib` closure, runs `QCoreApplication` +
-`Emu::Init()`, prints `[rp_rpcs3] Emu.Init OK (stopped=1)`, and exits 0 — no source patching of `rpcs3_ui`
-was needed once Qt matched. Next: Task 2 (boot LittleBigPlanet, null renderer).
+**Status:** Tasks 1 + 2 **DONE + verified** (2026-08-11). Task 1: `rp_rpcs3_host.exe` links the full
+`rpcs3_lib` closure and runs `Emu::Init()` (exit 0) — resolved via **Option 1** (match RPCS3's expected Qt,
+6.10.3 on D; no `rpcs3_ui` source patches needed). Task 2: it boots **LittleBigPlanet GOTY** headless with the
+null renderer + RetroBat firmware — `BootGame -> no_errors`, title `BCUS98208` recognized, emulation enters
+*running* — then stops ~3s later (cleanly, no error: the null renderer gives the title no RSX/display, so it
+halts; Task 3's Vulkan `GSFrameBase` is where it gets one). Next: Task 3 (custom Vulkan GSFrameBase + first
+frame + present seam).
+
+## Task 2 — headless boot (2026-08-11)
+
+Rather than re-implement the headless callbacks, the host **instantiates RPCS3's own `headless_application`**
+(now linkable via `rpcs3_ui`): its `Init()` does `InitializeCallbacks` (null renderer/camera/music, no dialogs)
++ `InitializeEmulator` (`SetHeadless`+`Emu.Init`) + `InitializeConnects` (the `call_from_main_thread`
+marshalling that needs `app.exec()`). Then `Emu.BootGame(<disc>, "", /*direct=*/true)` + a bounded Qt loop.
+Key gotchas found & fixed:
+- **`g_headless` ≠ `Emu.SetHeadless()`.** `Emu.SetHeadless()` only selects the null renderer; the *distinct*
+  global `g_headless` (rpcs3.cpp:91) is what makes `report_fatal_error` do stderr+abort instead of spinning up
+  a `QApplication` for a GUI dialog (which null-derefs in our headless host — the `QGuiApplicationPrivate`
+  crash + a doubled run we first saw). It's normally set only by `run_rpcs3`'s `--headless` arg, which we
+  bypass — so the host sets `extern atomic_t<bool> g_headless; g_headless = true;` itself (as RPCS3's unit
+  tests do). This both kills the crash and unmasks real errors on stderr.
+- **`BootGame(direct=true)` already autostarts `Run()`** internally (System.cpp:2714). Calling `Emu.Run()`
+  again trips `ensure(IsReady())` (System.cpp:2730) since it's already running — don't double-run.
+- **Firmware** comes from RetroBat via `RPCS3_CONFIG_DIR=C:\RetroBat\emulators\rpcs3\` (trailing slash
+  required — `fs::get_config_dir` truncates to the last '/'); `dev_flash` resolves there (firmware 4.90). The
+  `.ps3` is a decrypted-disc **folder** (PS3_DISC.SFB + PS3_GAME) — pass the folder; RPCS3 mounts dev_bdvd.
+- **No log file:** RPCS3's file-log sink is set up in `run_rpcs3` (bypassed), so the host writes no RPCS3.log;
+  use stdout state-polling (`Emu.IsRunning/IsStopped/...`) for the run timeline instead.
 
 This records the one thing Task 1 set out to learn — *does our own code link `rpcs3_emu` and run
 `Emu::Init()`?* — so the next session doesn't re-derive it. `external/rpcs3` is git-ignored (the notes/patch
