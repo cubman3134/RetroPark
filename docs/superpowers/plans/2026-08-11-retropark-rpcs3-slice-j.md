@@ -160,8 +160,42 @@ lock-step. **Frame-transfer path chosen: A — zero-copy GPU blit.**
     `TRANSFER_DST|SRC|COLOR_ATTACHMENT|SAMPLED`, TILING_OPTIMAL, EXCLUSIVE, UNDEFINED, OPAQUE_WIN32 dedicated;
     never close the host's NT handles. Also `tests/test_vulkan_handoff.cpp` = a no-core producer rig to validate
     import/blit/signal in isolation.
-  - **Sub-step D TODO (submit_frame relay):** child → pipe → DLL → `host.submit_frame(0, generation,
-    sync_value)`. (The child signals the timeline directly via its imported copy; the DLL only needs the notify.)
+  - **Sub-step D DONE (submit_frame relay, compiles):** DLL `CreatePipe`s (write end inheritable → child via
+    `--rp-pipe`, read end private), spawns `submit_reader` thread that `ReadFile`s `rp_submit_msg`
+    {index,generation,sync_value} and calls `host.submit_frame`; `kill_child` closes our write end so the reader
+    EOFs on child exit, then joins. Child has `rp_send_submit()` (WriteFile the msg) — call it after each frame.
+  - **Sub-step B/C TODO — the producer (the intricate, deadlock-prone heart). COMPLETE SPEC:**
+    - **Prereq patch 1 (device.cpp:508):** RPCS3's device enables `VK_EXT_external_memory_host` but NOT the
+      win32 external ext's — ADD `VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME` +
+      `VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME` to `requested_extensions` (guard on physical-device
+      support); ensure `timelineSemaphore` feature enabled. Without these the OPAQUE_WIN32 import fails.
+    - **Prereq patch 2 (adapter UUID):** before boot, enumerate VkPhysicalDevices, find the one whose
+      `VkPhysicalDeviceIDProperties.deviceUUID == g_handoff.uuid`, read its name, set RPCS3's adapter to that
+      name (`g_cfg.video.vk.adapter` / `Emu.SetDefaultGraphicsAdapter`). Single discrete GPU here so it likely
+      already matches, but set explicitly.
+    - **Handle extraction @ VKPresent.cpp:757** (from the VK cheat-sheet, all on `VKGSRender::flip`): VkDevice
+      `*m_device`; VkPhysicalDevice `(VkPhysicalDevice)m_device->gpu()`; queue `m_device->get_graphics_queue()`;
+      family `m_device->get_graphics_queue_family()`; src `image_to_flip->value` (**NULL-CHECK image_to_flip**);
+      layout `image_to_flip->current_layout` (do NOT assume — read it); dims/format `->width()/height()/format()`.
+    - **VKPresent hook (patch, inside `if (image_to_flip)` after the media-capture block ~:757):** call
+      `rp_producer::on_present(device, phys, queue, qfam, srcImage, srcLayout, w, h, srcFormat)`.
+    - **Producer (`rp_producer` in rp_rpcs3.cpp):** `active()`=`g_handoff.have`. Lazy `init`: import shared image
+      — byte-identical `VkImageCreateInfo` (R8G8B8A8_UNORM, usage TRANSFER_DST|SRC|COLOR_ATTACHMENT|SAMPLED,
+      TILING_OPTIMAL, EXCLUSIVE, UNDEFINED, `VkExternalMemoryImageCreateInfo` OPAQUE_WIN32) at
+      `g_handoff.width×height`, `VkImportMemoryWin32HandleInfoKHR(g_handoff.image)`+dedicated, bind; import
+      timeline `vkImportSemaphoreWin32HandleKHR(g_handoff.timeline)`; own VkCommandPool/Buffer/Fence on `qfam`.
+      Per `on_present` (frame f, slot 0): raw barrier src `current_layout→TRANSFER_SRC`, shared `UNDEFINED→GENERAL`,
+      `vkCmdBlitImage` src→shared LINEAR, restore src, **QFOT release shared GENERAL→GENERAL `qfam→
+      VK_QUEUE_FAMILY_EXTERNAL_KHR`**; submit under **`vk::acquire_global_submit_lock()`** (MTRSX shares the
+      queue!) with `VkTimelineSemaphoreSubmitInfo` **signal 2f, wait 2(f-1)+1 if f>1**; `vkWaitForFences`;
+      `rp_send_submit(0, g_handoff.generation, 2f)`. MODEL: `RefCoreVk.cpp` loop/record_frame (swap its
+      `vkCmdClearColorImage` for the blit; it lives entirely in GENERAL).
+    - **BGRA→RGBA caveat:** `vkCmdBlitImage` does NOT swizzle channels — blitting RPCS3's B8G8R8A8 present-source
+      into the R8G8B8A8 shared image swaps R/B (blue tint). Fix with a component-swizzled image view / small pass,
+      or accept swapped colors for the first proof.
+    - **GATE:** copy `tests/test_dolphin_core_e2e.cpp` → `test_rpcs3_core_e2e.cpp` (`RP_RPCS3_CORE_DIR` + a PS3
+      EBOOT), null-HWND runtime, assert non-empty; OR `retropark_harness.exe --api vulkan --core <dir> --content
+      <EBOOT>` (visual; window shows the frame once the blit lands).
   - **GATE:** copy `tests/test_dolphin_core_e2e.cpp` (null-HWND offscreen runtime → `load_core(rpcs3_present)` →
     `load_content(EBOOT.BIN file)` → loop `rp_runtime_present(buf)` → assert non-empty), swapping
     `RP_DOLPHIN_CORE_DIR`→`RP_RPCS3_CORE_DIR` + a PS3 EBOOT; child needs Qt-bin on PATH + `RPCS3_CONFIG_DIR`.
