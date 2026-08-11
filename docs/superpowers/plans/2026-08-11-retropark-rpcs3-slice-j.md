@@ -120,6 +120,28 @@ lock-step. **Frame-transfer path chosen: A — zero-copy GPU blit.**
 
 > **Input is OUT of this slice** (the RPCS3 pad web — its own slice). Savestate over the ABI: later.
 
+## Execution status (2026-08-11)
+
+- **Task 1 DONE** (gate pass): `rpcs3_present.dll` skeleton exports ABI v5; a load test mirroring `CoreLoader`
+  passes (`abi_version=5`, `get_info={presenting,vulkan,rpcs3_present}`, create/get_av_info/load_content). Heavy
+  DLL packages + links + loads.
+- **Task 2 PARTIAL — gate proven, then a real BLOCKER.** `create`→`load_content(EBOOT)`→`start` boots RPCS3
+  fully via the ABI on a `std::thread` (log: BootGame OK, cellAudio 48kHz open, RSX rendering, PRX modules
+  loading — "booted, running the title"). BUT RPCS3 **destabilizes inside the DLL on a spawned thread**: silent
+  process exit ~6s (QMetaObject `call_from_main_thread` + `app.exec()` on the boot thread) or ~1s (synchronous
+  `call_from_main_thread`, no exec) — no crash dump, no fatal stderr, no "Stopping emulator". The standalone
+  `rp_rpcs3_host` EXE (same boot logic, QCoreApplication on the process MAIN thread) runs stably 40s+.
+  **ROOT CAUSE: RPCS3's QCoreApplication requires the process main thread**; the core can't own main (the
+  Runtime does).
+  **FIX OPTIONS (design decision for the next session):** (a) run RPCS3 on the process main thread (needs a
+  Runtime "run-on-main" hook / different core-threading contract); **(b) spawn RPCS3 in a CHILD PROCESS** —
+  clean for RPCS3 because it's desktop-only AND the OPAQUE_WIN32 shared image + external timeline are already
+  **cross-process shareable**, so the zero-copy handoff works across the boundary; `rp_rpcs3_host` (which
+  already runs RPCS3 stably on its own main thread) becomes the child, and `rpcs3_present.dll` launches + feeds
+  it. **(b) is likely the cleanest for RPCS3** and should be the plan's revised Task-2 approach.
+- **Tasks 3-4 unchanged**, but the frame producer (Task 3) then lives in the child (option b) or the core
+  (option a) accordingly; the external-memory import target is the same either way.
+
 ## Self-Review notes
 - Spec §6 decision recorded: Path A (GPU blit). B (CPU staging) stays the documented portable fallback.
 - LBP-content caveat (Slice I): the handoff gate shows black frames until LBP's boot-past-logos is solved
