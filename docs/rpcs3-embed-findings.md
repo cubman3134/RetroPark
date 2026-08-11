@@ -41,10 +41,22 @@ own `run_rpcs3` bootstrap that we replace:
    few seconds (shader-compile storm) crashes the game; holding off lets it run rock-stable (60s+).
 
 Result: real LBP PPU threads (`bringup`/`main loading`/`main slow`/`respump`/`JobManagerWorker`), RSX shader
-compilation (`RSX: Add program vp/fp`), **43 frames presented to our Vulkan surface**, BGRA readback captured.
-The frames captured so far are the black loading screen — LBP then enters a long non-presenting load phase
-(frame count plateaus), so a visible-content framedump needs the title to progress further (more time / input);
-the render pipeline itself is fully exercised.
+compilation (`RSX: Add program vp/fp`), **~36-43 frames presented to our Vulkan surface** (counted in `flip()`),
+BGRA readback captured. The render pipeline is fully exercised; the harness runs stably (60s+, no crash).
+
+**Content-frame limitation (investigated, banked — don't re-chase without a new idea).** The captured frames
+are the black loading screen. Getting a *visible* (menu/logo) framedump is blocked by a genuine RPCS3/LBP catch:
+the only frames with content are the boot logos in the first few seconds, but **requesting the readback
+(`g_user_asked_for_screenshot`) during that early GPU-heavy boot crashes the title** — the fault is inside
+RPCS3's own `VKPresent` readback (`copy_image_to_buffer` + mid-frame `flush_command_queue(true)`) under the
+boot load, NOT our code. Once the readback is safe (~t≥25s) LBP has entered a long non-presenting load and
+`flip()` has plateaued, so there is no content frame left to grab. Tried and did NOT help: moving all our
+readback work (pixel scan + BMP write) off the RSX thread to the main thread via a flag handshake; forcing the
+synchronous shader recompiler (`shader_mode::recompiler`) to kill the async-compile race. So the harness gates
+the readback to the safe window and relies on `vk_frames_presented` as the live proof; the readback egress
+itself is separately proven (it wrote real 1280×720 BGRA loading frames to `D:/rpcs3-rp/first_frame.bmp`). A
+future run wanting a visible frame should try: a lighter/faster-booting PS3 title, feeding input to advance
+past LBP's load, or a GPU-side copy of `get_present_source()` (see seam below) instead of RPCS3's CPU readback.
 
 **Present seam (for the later shared-`VkImage` handoff, Slice-J equivalent):** RPCS3's final composited frame
 is available two ways on our `GSFrameBase`, both sourced in `Emu/RSX/VK/VKPresent.cpp` (`VKGSRender::flip`):
