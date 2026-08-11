@@ -6,6 +6,16 @@
 **Goal:** Package the Slice-I RPCS3 embed as a loadable `rpcs3_present` RetroPark core (ABI v5) that renders
 into the Runtime's host-owned shared `VkImage` exactly like `dolphin_present`.
 
+> **STATUS 2026-08-11: FUNCTIONALLY COMPLETE.** The cross-process zero-copy frame handoff works end-to-end under
+> the real Runtime: the producer imports the host's shared VkImage + timeline into RPCS3's VkDevice, per-frame
+> blits `get_present_source()` into it (QFOT + even/odd timeline), relays `submit_frame` over the pipe, and the
+> host consumes + signals back — the producer advances frame after frame (verified: `pipe=1`, frame counter
+> climbing to ~24 then plateauing exactly as LBP stops presenting). Composited frames are black (LBP's
+> boot-loading — the documented Slice-I content limitation), so a *visible game* frame awaits LBP progressing
+> past its load; the handoff pipeline itself is complete. Tasks 1-4 all done. Remaining polish: BGRA→RGBA
+> swizzle (colors swapped), the adapter-UUID force (unneeded on this single-GPU box), and a headless doctest
+> gate (can't assert non-empty until LBP renders content).
+
 **Architecture:** A `rpcs3_present.dll` exports `rp_get_core_abi()`; the Runtime loads it, hands it a shared
 `VkImage` + external timeline semaphore; the core imports them into RPCS3's own VkDevice (UUID-matched to the
 host GPU) and per-frame blits RPCS3's present-source image into the shared image with QFOT + even/odd timeline
