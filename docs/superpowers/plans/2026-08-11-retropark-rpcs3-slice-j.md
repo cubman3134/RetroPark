@@ -168,6 +168,13 @@ lock-step. **Frame-transfer path chosen: A — zero-copy GPU blit.**
     OR visual: `retropark_harness.exe --api vulkan --core <dir>/cores/rpcs3_present --content <EBOOT.BIN>`.
     Timeline note: host `composite_and_present` waits `sync_value` + signals `sync_value+1` (VulkanBackend.cpp:517).
   - Audio (Task 4) relays over the same pipe.
+  - **INTEGRATION VALIDATED under the real Runtime (2026-08-11):** core dir `build/cores/rpcs3_present/` (DLL +
+    `rp_rpcs3_host.exe` sibling + `core.json`); `build/harness/windowed/Debug/retropark_harness.exe --api
+    vulkan --core <coredir> --content <EBOOT.BIN>` (Qt bin on PATH + `RPCS3_CONFIG_DIR`). RetroPark's real
+    Runtime loaded the core, created the shared image + timeline, `set_surfaces` (real handles), the DLL
+    launched the child, and **RPCS3 booted + ran stably ~14.7s under the real Runtime**. Core-loads +
+    child-gets-real-handles PROVEN; the window composites empty until the producer lands. So the ONLY remaining
+    work is the Vulkan producer (sub-steps B/C) + the submit_frame pipe relay (D) + a headless doctest gate.
 
 ## Self-Review notes
 - Spec §6 decision recorded: Path A (GPU blit). B (CPU staging) stays the documented portable fallback.
