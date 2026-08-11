@@ -1,12 +1,39 @@
 # RPCS3 Embed — Slice I Task 1 findings (linkage) + resume fork
 
 **Date:** 2026-08-10
-**Status:** Arc **PAUSED** after Task 1. Feasibility proven; the linkage question is answered; the resume
-decision (below) is deferred to a fresh, deliberate start.
+**Status:** Task 1 **DONE + verified** (2026-08-11). The fork below was resolved via **Option 1** (match
+RPCS3's expected Qt). `rp_rpcs3_host.exe` links the full `rpcs3_lib` closure, runs `QCoreApplication` +
+`Emu::Init()`, prints `[rp_rpcs3] Emu.Init OK (stopped=1)`, and exits 0 — no source patching of `rpcs3_ui`
+was needed once Qt matched. Next: Task 2 (boot LittleBigPlanet, null renderer).
 
 This records the one thing Task 1 set out to learn — *does our own code link `rpcs3_emu` and run
 `Emu::Init()`?* — so the next session doesn't re-derive it. `external/rpcs3` is git-ignored (the notes/patch
 are the record); this committed doc is that record for the embed side.
+
+## RESOLUTION (2026-08-11): Option 1 — Qt 6.10.3 on the D drive
+
+The `game_list_frame.cpp` / `config_database.cpp` errors were **purely a Qt-version mismatch**: RPCS3 master's
+GUI code uses APIs from the Qt the devs build against (6.10+), while the box had 6.8.3. RPCS3's floor is
+`QT_MIN_VER 6.7.0` with a `>= 6.10.0` code branch, so matching 6.10.x is the clean fix — **no source patches**.
+
+Recipe (repeatable, no Qt account, installs to D so it's off the ~90%-full C drive):
+- `pip install aqtinstall` (used v3.3.0). aqt config `settings.ini` needed
+  `[requests] INSECURE_NOT_FOR_PRODUCTION_ignore_hash = True` (the default mirror fails the Updates.xml
+  checksum download); pass it as a **top-level** flag: `python -m aqt -c settings.ini install-qt ...`.
+- `python -m aqt -c settings.ini install-qt windows desktop 6.10.3 win64_msvc2022_64 -m qtmultimedia qtimageformats --outputdir D:\Qt`
+  → `D:\Qt\6.10.3\msvc2022_64`. NB: **`qtsvg` is NOT a separate module in 6.10** (Svg/SvgWidgets ship in
+  base); only `qtmultimedia` + `qtimageformats` are add-ons. (6.11.1's metadata failed to resolve under aqt
+  3.3.0 — 6.10.3 pulled fine and satisfies the `>= 6.10.0` branch.)
+- Reconfigure pointing at it, unsetting the cached 6.8.3 paths:
+  `Qt6_ROOT=D:\Qt\6.10.3\msvc2022_64  cmake -S . -B build -U "Qt6*_DIR" -DQt6_ROOT=D:/Qt/6.10.3/msvc2022_64`
+  (still delete `build/…/SDL3*Targets.cmake` first). Then build `--target rp_rpcs3_host`.
+- To RUN: put `D:\Qt\6.10.3\msvc2022_64\bin` on PATH (needs Qt6*.dll). The harness `quick_exit(0)`s right
+  after the proof print — `Emu.Init()` leaves RPCS3 background threads alive and letting `main()` return
+  null-derefs in Qt's static teardown (`QCoreApplicationPrivate`); RPCS3 itself hard-exits for the same
+  reason. Clean lifecycle (Kill/shutdown) is Task 2's job.
+
+Net: `rpcs3_ui` compiles clean on 6.10.3; `rp_rpcs3_host` links + inits. The vehicle embeds RPCS3 Qt-and-all,
+as expected for a desktop-only heavy core.
 
 ## What was already proven (build spike, same day)
 
