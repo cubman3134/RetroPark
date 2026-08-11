@@ -1,13 +1,58 @@
 # RPCS3 Embed — Slice I Task 1 findings (linkage) + resume fork
 
 **Date:** 2026-08-10
-**Status:** Tasks 1 + 2 **DONE + verified** (2026-08-11). Task 1: `rp_rpcs3_host.exe` links the full
-`rpcs3_lib` closure and runs `Emu::Init()` (exit 0) — resolved via **Option 1** (match RPCS3's expected Qt,
-6.10.3 on D; no `rpcs3_ui` source patches needed). Task 2: it boots **LittleBigPlanet GOTY** headless with the
-null renderer + RetroBat firmware — `BootGame -> no_errors`, title `BCUS98208` recognized, emulation enters
-*running* — then stops ~3s later (cleanly, no error: the null renderer gives the title no RSX/display, so it
-halts; Task 3's Vulkan `GSFrameBase` is where it gets one). Next: Task 3 (custom Vulkan GSFrameBase + first
-frame + present seam).
+**Status:** Slice I **COMPLETE** — Tasks 1, 2, 3 all DONE + verified (2026-08-11). Task 1: `rp_rpcs3_host.exe`
+links the full `rpcs3_lib` closure and runs `Emu::Init()` (exit 0) — resolved via **Option 1** (match RPCS3's
+expected Qt, 6.10.3 on D; no `rpcs3_ui` source patches). Task 2: boots **LittleBigPlanet GOTY** headless,
+`BootGame -> no_errors`, title `BCUS98208` recognized. Task 3: a **custom Vulkan `GSFrameBase`** (hidden Win32
+window) — RPCS3's own `VKGSRender` builds a swapchain on our HWND and **presented 43 real Vulkan frames to our
+surface** (`vk_frames_presented=43`), with a real **1280×720 BGRA frame read back** to disk. The
+presenting-core pattern is proven for a SECOND heavy app.
+
+> NB on Task 2's "stops ~3s": that was NOT the null renderer — it was the directory-boot precompile-quit path
+> (see Task 3 below). BootGame's `no_errors` was real; the title just never ran. Task 3's EBOOT-path fix makes
+> it actually run under both renderers.
+
+## Task 3 — custom Vulkan GSFrameBase + real frames (2026-08-11)
+
+The host subclasses `main_application` directly (NOT `headless_application`, which sets `Emu.SetHeadless(true)`
+→ `fixup_settings` force-nulls the renderer). It keeps Emu non-headless, sets renderer=vulkan, supplies a
+Vulkan `init_gs_render` (`g_fxo->init<rsx::thread, named_thread<VKGSRender>>`) and a `get_gs_frame` returning
+**`rp_gs_frame`** — a `GSFrameBase` backed by a hidden `WS_POPUP` Win32 window. `VKGSRender::on_init_thread`
+calls our `handle()` (the HWND) → `vkCreateWin32SurfaceKHR` → swapchain at `client_width/height` (1280×720);
+`make_context/set_current/delete_context` and the window-state methods are no-ops; `flip()` tallies frames;
+`take_screenshot()`/`present_frame()` are the readback egress (set `g_user_asked_for_screenshot` → RSX reads
+the composited frame back from VRAM in `VKPresent`, BGRA, pitch `w*4`). No `Q_OBJECT`/AUTOMOC:
+`call_from_main_thread` marshals via `QMetaObject::invokeMethod(..., Qt::QueuedConnection)`; `QCoreApplication`
+suffices (render_creator enumerates Vulkan fine — found the RTX 5080). No new source file → no reconfigure;
+`HAVE_VULKAN` + Vulkan includes reach our TU because `rpcs3_emu` links `3rdparty::vulkan` **PUBLIC**.
+
+Getting the title to actually RUN (not just link/boot) took four `run_rpcs3`-bypass fixes — RPCS3 assumes its
+own `run_rpcs3` bootstrap that we replace:
+1. **Boot the EBOOT.BIN *file*, not the `.ps3` folder.** A directory path enters RPCS3's "Special boot mode
+   (directory scan)" (`System.cpp:1808`): it precompiles every module then `Emu.Kill()`s — `BootGame` returns
+   `no_errors` but the game never runs. (This was also Task 2's phantom "3s stop".)
+2. **Bring up the file logger** (`logs::make_file_listener` + `logs::set_init({})`) — else every log line stays
+   buffered and never hits disk, leaving the boot un-debuggable.
+3. **`SetProcessWorkingSetSize(GetCurrentProcess(), 0x80000000, 0xC0000000)`** (rpcs3.cpp:645) — RPCS3
+   `VirtualLock`s its "sudo" fast-memory mirror; without the 2-3 GiB working set `lock_sudo` fails ("Failed to
+   lock sudo memory") and LBP crashes ~4.5s in.
+4. **Don't read frames back during early GPU-heavy boot** — requesting the screenshot readback in the first
+   few seconds (shader-compile storm) crashes the game; holding off lets it run rock-stable (60s+).
+
+Result: real LBP PPU threads (`bringup`/`main loading`/`main slow`/`respump`/`JobManagerWorker`), RSX shader
+compilation (`RSX: Add program vp/fp`), **43 frames presented to our Vulkan surface**, BGRA readback captured.
+The frames captured so far are the black loading screen — LBP then enters a long non-presenting load phase
+(frame count plateaus), so a visible-content framedump needs the title to progress further (more time / input);
+the render pipeline itself is fully exercised.
+
+**Present seam (for the later shared-`VkImage` handoff, Slice-J equivalent):** RPCS3's final composited frame
+is available two ways on our `GSFrameBase`, both sourced in `Emu/RSX/VK/VKPresent.cpp` (`VKGSRender::flip`):
+`take_screenshot()` (gated by `g_user_asked_for_screenshot`) and `present_frame()` (gated by
+`g_recording_mode != stopped && can_consume_frame()`). Both receive the pre-present source image read back from
+VRAM (`copy_image_to_buffer` → host-visible buffer), `width×height` = the game's buffer dims, 4 bpp, BGRA when
+`format()==VK_FORMAT_B8G8R8A8_UNORM`. That readback (or, better, a GPU-side copy of `get_present_source()`'s
+image into RetroPark's shared `VkImage`) is where the Slice-J handoff hooks.
 
 ## Task 2 — headless boot (2026-08-11)
 
