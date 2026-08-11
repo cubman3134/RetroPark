@@ -145,12 +145,29 @@ lock-step. **Frame-transfer path chosen: A — zero-copy GPU blit.**
   thread. Verified STABLE: `running=1` for the full 28s window (vk_frames_presented=40), no ~6s crash, clean
   start/stop/DONE. `rp_rpcs3_host.exe` reads the boot path from argv[1] (LBP default otherwise). The in-process
   boot version of `rp_rpcs3_present.cpp` was replaced by the launcher.
-- **Task 3 (revised for child process):** on `start`, `DuplicateHandle` the host's shared-image + timeline NT
-  handles into the child and append their child-side values + `device_uuid` + `generation` + `w/h` to the
-  child's command line; the child (`rp_rpcs3_host.exe`) imports them into RPCS3's VkDevice, does the per-frame
-  blit of `get_present_source()` into the shared image (QFOT + even/odd timeline), and relays `submit_frame`
-  (index/generation/sync_value) back to the DLL over a pipe; the DLL calls `host.submit_frame`. Audio (Task 4)
-  relays the same way.
+- **Task 3 (revised for child process) — IN PROGRESS.**
+  - **Sub-step A DONE (handle passing):** `rp_start` `DuplicateHandle`s the host image+timeline into inheritable
+    copies and appends `--rp-image/--rp-timeline/--rp-uuid/--rp-gen/--rp-w/--rp-h` to the child cmdline
+    (`bInheritHandles=TRUE`); `rp_rpcs3_host.exe` `rp_parse_handoff()` parses them into `g_handoff`. Verified:
+    child logs `handoff: image=0x1234 timeline=0x5678 640x480 gen=7 uuid=..` then boots. Uses ring **slot 0**
+    only (like dolphin_present), so only `surfaces[0]`'s handle is passed.
+  - **Sub-step B/C TODO (the Vulkan producer, in the child):** force RPCS3's adapter to `g_handoff.uuid`;
+    import the shared image + timeline into RPCS3's VkDevice; per-frame blit `get_present_source()` → shared
+    image (BGRA→RGBA) + QFOT release `→VK_QUEUE_FAMILY_EXTERNAL_KHR` + timeline signal, then relay to the DLL.
+    **MODEL: `cores/refcore_present_vk/RefCoreVk.cpp`** — `pick_device_by_uuid` (:216), `build_from_surfaces`
+    import (:242,:281-340), `loop()` even/odd lock-step (:116-168, producer signals `2f`, waits `2*(f-count)+1`),
+    `record_frame` QFOT (:175-211). Byte-identical `VkImageCreateInfo`: R8G8B8A8_UNORM, usage
+    `TRANSFER_DST|SRC|COLOR_ATTACHMENT|SAMPLED`, TILING_OPTIMAL, EXCLUSIVE, UNDEFINED, OPAQUE_WIN32 dedicated;
+    never close the host's NT handles. Also `tests/test_vulkan_handoff.cpp` = a no-core producer rig to validate
+    import/blit/signal in isolation.
+  - **Sub-step D TODO (submit_frame relay):** child → pipe → DLL → `host.submit_frame(0, generation,
+    sync_value)`. (The child signals the timeline directly via its imported copy; the DLL only needs the notify.)
+  - **GATE:** copy `tests/test_dolphin_core_e2e.cpp` (null-HWND offscreen runtime → `load_core(rpcs3_present)` →
+    `load_content(EBOOT.BIN file)` → loop `rp_runtime_present(buf)` → assert non-empty), swapping
+    `RP_DOLPHIN_CORE_DIR`→`RP_RPCS3_CORE_DIR` + a PS3 EBOOT; child needs Qt-bin on PATH + `RPCS3_CONFIG_DIR`.
+    OR visual: `retropark_harness.exe --api vulkan --core <dir>/cores/rpcs3_present --content <EBOOT.BIN>`.
+    Timeline note: host `composite_and_present` waits `sync_value` + signals `sync_value+1` (VulkanBackend.cpp:517).
+  - Audio (Task 4) relays over the same pipe.
 
 ## Self-Review notes
 - Spec §6 decision recorded: Path A (GPU blit). B (CPU staging) stays the documented portable fallback.
