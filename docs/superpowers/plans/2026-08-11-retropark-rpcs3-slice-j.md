@@ -139,8 +139,18 @@ lock-step. **Frame-transfer path chosen: A — zero-copy GPU blit.**
   **cross-process shareable**, so the zero-copy handoff works across the boundary; `rp_rpcs3_host` (which
   already runs RPCS3 stably on its own main thread) becomes the child, and `rpcs3_present.dll` launches + feeds
   it. **(b) is likely the cleanest for RPCS3** and should be the plan's revised Task-2 approach.
-- **Tasks 3-4 unchanged**, but the frame producer (Task 3) then lives in the child (option b) or the core
-  (option a) accordingly; the external-memory import target is the same either way.
+- **Task 2 RESOLVED via CHILD PROCESS (option b, user's choice) — DONE.** `rpcs3_present.dll` is now a thin
+  launcher (34KB, no longer links rpcs3_lib): `start` spawns the sibling `rp_rpcs3_host.exe` (found via
+  `GetModuleHandleEx`-from-address → same dir) with the EBOOT as argv[1]; the child runs RPCS3 on ITS own main
+  thread. Verified STABLE: `running=1` for the full 28s window (vk_frames_presented=40), no ~6s crash, clean
+  start/stop/DONE. `rp_rpcs3_host.exe` reads the boot path from argv[1] (LBP default otherwise). The in-process
+  boot version of `rp_rpcs3_present.cpp` was replaced by the launcher.
+- **Task 3 (revised for child process):** on `start`, `DuplicateHandle` the host's shared-image + timeline NT
+  handles into the child and append their child-side values + `device_uuid` + `generation` + `w/h` to the
+  child's command line; the child (`rp_rpcs3_host.exe`) imports them into RPCS3's VkDevice, does the per-frame
+  blit of `get_present_source()` into the shared image (QFOT + even/odd timeline), and relays `submit_frame`
+  (index/generation/sync_value) back to the DLL over a pipe; the DLL calls `host.submit_frame`. Audio (Task 4)
+  relays the same way.
 
 ## Self-Review notes
 - Spec §6 decision recorded: Path A (GPU blit). B (CPU staging) stays the documented portable fallback.
