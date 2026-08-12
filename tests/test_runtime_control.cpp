@@ -1,0 +1,166 @@
+#include <doctest/doctest.h>
+#include <retropark/retropark.h>
+#include <vector>
+#include <thread>
+#include <chrono>
+#include <string>
+#include <filesystem>
+#include <fstream>
+#ifndef RP_VK_CORE_DIR
+#define RP_VK_CORE_DIR "."
+#endif
+#ifndef RP_DRIVEN_CORE_DIR
+#define RP_DRIVEN_CORE_DIR "cores/refcore_driven"
+#endif
+#ifndef RP_SHIM_DIR
+#define RP_SHIM_DIR "."
+#endif
+#ifndef RP_NES_ROM_DIR
+#define RP_NES_ROM_DIR "C:/RetroBat/roms/nes"
+#endif
+
+static std::string ctrl_first_nes(const std::string& dir) {
+    std::error_code ec;
+    if (!std::filesystem::exists(dir, ec)) return {};
+    for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+        if (ec) break;
+        if (e.is_regular_file() && e.path().extension() == ".nes") return e.path().string();
+    }
+    return {};
+}
+static bool ctrl_file_exists(const std::string& p) {
+    std::ifstream f(p, std::ios::binary); return (bool)f;
+}
+
+TEST_CASE("runtime control: get_status reflects core type + pause flag") {
+    rp_runtime* rt = rp_runtime_create(RP_GFX_VULKAN, nullptr);
+    REQUIRE(rt);
+    rp_runtime_status st{};
+    // no core yet
+    CHECK(rp_runtime_get_status(rt, &st) == RP_OK);
+    CHECK(st.content_loaded == 0);
+    CHECK(rp_runtime_get_status(rt, nullptr) == RP_ERR_BAD_ARG);
+    // load the reference presenting core (content-free: it renders without load_content)
+    REQUIRE(rp_runtime_resize(rt, 64, 64) == RP_OK);
+    REQUIRE(rp_runtime_load_core(rt, RP_VK_CORE_DIR) == RP_OK);
+    REQUIRE(rp_runtime_get_status(rt, &st) == RP_OK);
+    CHECK(st.core_type == RP_CORE_PRESENTING);
+    CHECK(st.graphics_api == RP_GFX_VULKAN);
+    CHECK(st.paused == 0);
+    CHECK(rp_runtime_pause(rt) == RP_OK);
+    REQUIRE(rp_runtime_get_status(rt, &st) == RP_OK);
+    CHECK(st.paused == 1);
+    CHECK(rp_runtime_resume(rt) == RP_OK);
+    REQUIRE(rp_runtime_get_status(rt, &st) == RP_OK);
+    CHECK(st.paused == 0);
+    rp_runtime_destroy(rt);
+}
+
+TEST_CASE("runtime control: driven pause freezes the frame") {
+    rp_runtime* rt = rp_runtime_create(RP_GFX_VULKAN, nullptr);
+    REQUIRE(rt);
+    REQUIRE(rp_runtime_resize(rt, 64, 64) == RP_OK);
+    REQUIRE(rp_runtime_load_core(rt, RP_DRIVEN_CORE_DIR) == RP_OK);   // content-free driven ref core
+    std::vector<uint8_t> a(64*64*4), b(64*64*4), c(64*64*4);
+    REQUIRE(rp_runtime_present(rt, a.data()) == RP_OK);
+    REQUIRE(rp_runtime_present(rt, b.data()) == RP_OK);
+    CHECK(a != b);                                   // animates while running
+    REQUIRE(rp_runtime_pause(rt) == RP_OK);
+    REQUIRE(rp_runtime_present(rt, a.data()) == RP_OK);
+    REQUIRE(rp_runtime_present(rt, b.data()) == RP_OK);
+    CHECK(a == b);                                   // frozen while paused
+    REQUIRE(rp_runtime_resume(rt) == RP_OK);
+    REQUIRE(rp_runtime_present(rt, c.data()) == RP_OK);
+    CHECK(c != b);                                   // resumes
+    rp_runtime_destroy(rt);
+}
+
+TEST_CASE("runtime control: reset reboots content") {
+    rp_runtime* rt = rp_runtime_create(RP_GFX_VULKAN, nullptr);
+    REQUIRE(rt);
+    REQUIRE(rp_runtime_resize(rt, 64, 64) == RP_OK);
+    REQUIRE(rp_runtime_load_core(rt, RP_DRIVEN_CORE_DIR) == RP_OK);   // content-free driven ref core
+    std::vector<uint8_t> first(64*64*4), later(64*64*4), afterReset(64*64*4);
+    REQUIRE(rp_runtime_present(rt, first.data()) == RP_OK);
+    for (int i = 0; i < 10; i++) rp_runtime_present(rt, later.data());
+    CHECK(first != later);
+    REQUIRE(rp_runtime_reset(rt) == RP_OK);
+    REQUIRE(rp_runtime_present(rt, afterReset.data()) == RP_OK);
+    CHECK(afterReset == first);                      // rebooted to frame 0
+    rp_runtime_destroy(rt);
+}
+
+TEST_CASE("runtime control: reset reboots a driven CONTENT core (full teardown)") {
+    // Exercises the unified reset() teardown on a driven core that TAKES content (the libretro
+    // shim + a real NES ROM). The old reset() re-ran load_content on a still-live driven
+    // instance (a second retro_load_game); the fix destroys+re-creates the core, so a byte-
+    // identical boot frame after reset proves the reboot returned to a clean frame-0 state.
+    // Skips cleanly where the shim/ROM fixture is absent (matches test_libretro_e2e).
+    std::string rom = ctrl_first_nes(RP_NES_ROM_DIR);
+    if (rom.empty() || !ctrl_file_exists(std::string(RP_SHIM_DIR) + "/fceumm_libretro.dll")) {
+        WARN("no shim/rom; skip driven-content reset");
+        return;
+    }
+    const uint32_t W = 256, H = 240;   // NES resolution
+    rp_runtime* rt = rp_runtime_create(RP_GFX_VULKAN, nullptr);
+    REQUIRE(rt);
+    REQUIRE(rp_runtime_resize(rt, W, H) == RP_OK);
+    REQUIRE(rp_runtime_load_core(rt, RP_SHIM_DIR) == RP_OK);
+    REQUIRE(rp_runtime_load_content(rt, rom.c_str()) == RP_OK);
+    std::vector<uint8_t> boot((size_t)W*H*4, 0), later((size_t)W*H*4, 0), afterReset((size_t)W*H*4, 0);
+    REQUIRE(rp_runtime_present(rt, boot.data()) == RP_OK);   // deterministic frame 0 of a fresh boot
+    // Advance until the frame animates, proving real emulation is running before the reboot.
+    for (int i = 0; i < 1000; i++) { rp_runtime_present(rt, later.data()); if (later != boot) break; }
+    CHECK(boot != later);
+    // Full-teardown reboot: destroy -> reload DLL -> re-create -> finish_load_core -> re-load ROM.
+    REQUIRE(rp_runtime_reset(rt) == RP_OK);
+    rp_runtime_status st{};
+    REQUIRE(rp_runtime_get_status(rt, &st) == RP_OK);
+    CHECK(st.content_loaded == 1);                          // content re-loaded across the reboot
+    REQUIRE(rp_runtime_present(rt, afterReset.data()) == RP_OK);
+    CHECK(afterReset == boot);                              // rebooted to a byte-identical frame 0
+    rp_runtime_unload_core(rt);
+    rp_runtime_destroy(rt);
+}
+
+TEST_CASE("runtime control: get_status reports fps after presents") {
+    rp_runtime* rt = rp_runtime_create(RP_GFX_VULKAN, nullptr);
+    REQUIRE(rt);
+    REQUIRE(rp_runtime_resize(rt, 64, 64) == RP_OK);
+    REQUIRE(rp_runtime_load_core(rt, RP_VK_CORE_DIR) == RP_OK);
+    std::vector<uint8_t> buf(64*64*4);
+    rp_runtime_status st{};
+    for (int i = 0; i < 120; i++) rp_runtime_present(rt, buf.data());
+    REQUIRE(rp_runtime_get_status(rt, &st) == RP_OK);
+    CHECK(st.fps >= 0.0);            // populated, never garbage
+    rp_runtime_destroy(rt);
+}
+
+TEST_CASE("runtime control: presenting pause freezes the frame") {
+    using namespace std::chrono_literals;
+    rp_runtime* rt = rp_runtime_create(RP_GFX_VULKAN, nullptr);
+    REQUIRE(rt);
+    REQUIRE(rp_runtime_resize(rt, 64, 64) == RP_OK);
+    REQUIRE(rp_runtime_load_core(rt, RP_VK_CORE_DIR) == RP_OK);   // refcore_present_vk: rising-blue animation
+    std::vector<uint8_t> a(64*64*4), b(64*64*4);
+    // Liveness: the presenting core animates on its own producer thread (a new frame
+    // ~every 16ms). Two presents a couple of frame-times apart differ while running,
+    // which makes the freeze assertion below meaningful (a dead core would pass trivially).
+    rp_runtime_present(rt, a.data());
+    std::this_thread::sleep_for(40ms);
+    rp_runtime_present(rt, b.data());
+    REQUIRE(a != b);                              // animates while running
+    // Cache a freshly-produced frame immediately before pausing, so the whole 3-slot
+    // ring cycle (~48ms) of headroom remains before the producer recycles that slot.
+    std::this_thread::sleep_for(20ms);
+    rp_runtime_present(rt, a.data());             // this (unpaused) present caches "last ready"
+    REQUIRE(rp_runtime_pause(rt) == RP_OK);
+    // While paused the consumer re-presents the cached ring frame and IGNORES newly
+    // submitted ones. The two grabs straddle ~2 producer frames (28ms): unpaused,
+    // latest_ready would have advanced and they'd differ; paused, they are byte-identical.
+    rp_runtime_present(rt, a.data());
+    std::this_thread::sleep_for(28ms);
+    rp_runtime_present(rt, b.data());
+    CHECK(a == b);                                // frozen while paused: cached frame re-presented
+    rp_runtime_destroy(rt);
+}

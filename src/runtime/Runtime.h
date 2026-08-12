@@ -35,6 +35,10 @@ public:
     rp_result load_state(const void* buf, size_t size);
     rp_result set_rewind(int enabled, uint32_t max_snapshots);
     rp_result rewind();
+    rp_result pause();
+    rp_result resume();
+    rp_result reset();
+    rp_result get_status(rp_runtime_status* out);
 
     // Host-iface trampolines.
     void on_submit(uint32_t index, uint64_t generation, uint64_t sync_value);
@@ -50,6 +54,7 @@ private:
     rp_result rebuild_surfaces(std::string& err);
     rp_result finish_load_core(rp_core_type type, std::string& err);  // shared post-create logic
     void open_audio(const rp_av_info& av);
+    void tick_fps();  // rolling ~0.5s present-rate measure; cheap, no alloc/lock
 
     void* native_window_ = nullptr;
     rp_graphics_api api_;
@@ -83,5 +88,15 @@ private:
     bool     rewind_replay_  = false;   // set by rewind(); the next present() re-renders a
                                         // restored frame and must NOT capture it
     uint32_t rewind_max_     = 0;
+
+    std::atomic<bool> paused_{false};  // read on the audio puller thread (on_audio_sample) while
+                                       // written from the frontend thread (pause/resume/reset)
+    std::string content_path_;   // last-loaded content path, for reset()
+    std::string core_dir_;       // last dynamic core dir (reset fallback; empty for static)
+    std::string core_id_;        // last static core id (empty for dynamic)
+    // Presenting-core pause freeze: re-composite the last ring frame instead of acquiring a new one.
+    uint32_t last_ready_idx_ = 0; uint64_t last_ready_sv_ = 0; bool have_last_ready_ = false;
+    // fps measurement (present rate).
+    double fps_ = 0.0; uint64_t fps_count_ = 0; uint64_t fps_t0_ns_ = 0;
 };
 }

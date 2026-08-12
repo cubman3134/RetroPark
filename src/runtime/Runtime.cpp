@@ -8,6 +8,7 @@
 #include <sstream>
 #include <cstring>
 #include <algorithm>
+#include <chrono>
 
 namespace rp {
 
@@ -62,7 +63,7 @@ void Runtime::on_video_refresh(const void* data, uint32_t w, uint32_t h, uint32_
     dr_w_ = w; dr_h_ = h; dr_pitch_ = pitch;
 }
 void Runtime::on_audio_sample(const int16_t* frames, size_t n) {
-    if (suppress_audio_) return;           // silent re-simulation during rollback
+    if (suppress_audio_ || paused_) return; // rollback silence OR paused mute
     if (!frames || n == 0) return;
     audio_frames_ += n;
     if (!audio_nonsilent_) {
@@ -92,6 +93,7 @@ rp_result Runtime::rebuild_surfaces(std::string& err) {
     rp_result r = backend_->allocate_surfaces(ring_.slot_count(), width_, height_, descs, err);
     if (r != RP_OK) return r;
     uint64_t gen = ring_.reallocate(width_, height_);
+    have_last_ready_ = false;   // ring timeline was just rebuilt; a stale (idx,sv) would misfire
     for (auto& d : descs) d.generation = gen;
     if (loader_.state() == LoaderState::Created) {
         rp_surface_set set{};
@@ -145,7 +147,9 @@ rp_result Runtime::load_core(const std::string& core_dir) {
         module_.reset();
         return RP_ERR_INTERNAL;
     }
-    return finish_load_core(m.type, err);   // `m` = the CoreManifest; its .type feeds the shared branch logic
+    rp_result r = finish_load_core(m.type, err);   // `m` = the CoreManifest; its .type feeds the shared branch logic
+    if (r == RP_OK) { core_dir_ = core_dir; core_id_.clear(); }
+    return r;
 }
 
 rp_result Runtime::finish_load_core(rp_core_type type, std::string& err) {
@@ -204,7 +208,9 @@ rp_result Runtime::load_static_core(const std::string& core_id) {
         loader_.destroy(); module_.reset(); return RP_ERR_UNSUPPORTED;   // presenting core must match runtime api
     }
     if (loader_.create(&host_iface_, err) != RP_OK) { loader_.destroy(); module_.reset(); return RP_ERR_INTERNAL; }
-    return finish_load_core((rp_core_type)info.type, err);
+    rp_result r = finish_load_core((rp_core_type)info.type, err);
+    if (r == RP_OK) { core_id_ = core_id; core_dir_.clear(); }
+    return r;
 }
 
 rp_result Runtime::unload_core() {
@@ -222,11 +228,16 @@ rp_result Runtime::unload_core() {
     audio_frames_ = 0; audio_nonsilent_ = false;
     rewind_ring_.clear();
     rewind_enabled_ = false; rewind_replay_ = false; rewind_max_ = 0;
+    fps_ = 0.0; fps_t0_ns_ = 0; fps_count_ = 0;
+    paused_ = false;
+    have_last_ready_ = false; last_ready_idx_ = 0; last_ready_sv_ = 0;
+    content_path_.clear();
     return RP_OK;
 }
 
 rp_result Runtime::load_content(const char* path) {
     if (!core_loaded_) return RP_ERR_INTERNAL;
+    content_path_ = path ? path : "";   // remembered so reset() can reboot the same content
     std::string err;
     if (core_type_ == RP_CORE_PRESENTING) {
         // A presenting content core (e.g. dolphin_present): hand it the content, then start it —
@@ -289,7 +300,20 @@ rp_result Runtime::advance(int emit_audio) {
     return r;
 }
 
+void Runtime::tick_fps() {
+    using namespace std::chrono;
+    uint64_t now = (uint64_t)duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
+    if (fps_t0_ns_ == 0) { fps_t0_ns_ = now; fps_count_ = 0; return; }
+    fps_count_++;
+    uint64_t dt = now - fps_t0_ns_;
+    if (dt >= 500000000ull) {                    // 0.5s window
+        fps_ = (double)fps_count_ * 1e9 / (double)dt;
+        fps_t0_ns_ = now; fps_count_ = 0;
+    }
+}
+
 rp_result Runtime::render(uint8_t* out_rgba) {
+    tick_fps();
     if (!backend_) return RP_ERR_DEVICE;
     std::string err;
     if (core_loaded_ && core_type_ == RP_CORE_DRIVEN) {
@@ -303,14 +327,24 @@ rp_result Runtime::render(uint8_t* out_rgba) {
                                           dr_w_, dr_h_, dr_pitch_, dupe, out_rgba, err);
     }
     uint32_t idx = 0; uint64_t sv = 0;
-    bool has = ring_.latest_ready(idx, sv);
+    bool has;
+    if (paused_) {
+        // Re-present the LAST acquired frame (a repeat): composite_and_present re-composites
+        // surfaces_[idx] without re-acquiring / advancing the timeline. Nothing yet => black.
+        idx = last_ready_idx_; sv = last_ready_sv_; has = have_last_ready_;
+    } else {
+        has = ring_.latest_ready(idx, sv);
+        if (has) { last_ready_idx_ = idx; last_ready_sv_ = sv; have_last_ready_ = true; }
+    }
     return backend_->composite_and_present(idx, sv, has, out_rgba, err);
 }
 
 rp_result Runtime::present(uint8_t* out_rgba) {
     if (core_loaded_ && core_type_ == RP_CORE_DRIVEN) {
-        rp_result r = advance(1);
-        if (r != RP_OK) return r;
+        if (!paused_) {                     // paused: do not advance; re-composite the retained frame
+            rp_result r = advance(1);
+            if (r != RP_OK) return r;
+        }
         return render(out_rgba);
     }
     return render(out_rgba);                // presenting: composite_and_present, unchanged
@@ -360,6 +394,43 @@ rp_result Runtime::rewind() {
     // capture (which would re-grow the ring by replaying frames we are stepping back through).
     rewind_replay_ = true;
     return r;
+}
+
+rp_result Runtime::pause()  { if (core_loaded_) paused_ = true;  return RP_OK; }
+rp_result Runtime::resume() { paused_ = false; return RP_OK; }
+
+rp_result Runtime::get_status(rp_runtime_status* out) {
+    if (!out) return RP_ERR_BAD_ARG;
+    out->core_type      = (uint32_t)core_type_;
+    out->graphics_api   = (uint32_t)api_;
+    out->paused         = paused_ ? 1 : 0;
+    out->content_loaded = content_loaded_ ? 1 : 0;
+    out->fps            = fps_;
+    return RP_OK;
+}
+
+rp_result Runtime::reset() {
+    if (!core_loaded_) { paused_ = false; fps_ = 0.0; fps_t0_ns_ = 0; fps_count_ = 0; return RP_OK; }
+    // Unified full-teardown reboot: EVERY case (driven/presenting, content or content-free) goes
+    // through destroy -> re-create -> finish_load_core -> (re-load content). This avoids re-running
+    // load_content on a still-live driven instance (a second retro_load_game on the same core), and
+    // guarantees no pointer into the freed instance (dr_data_) or pre-reboot ring frame survives.
+    std::string err;
+    paused_ = false;
+    have_last_ready_ = false; last_ready_idx_ = 0; last_ready_sv_ = 0;
+    fps_ = 0.0; fps_t0_ns_ = 0; fps_count_ = 0;
+    dr_have_ = false; dr_data_ = nullptr; dr_dupe_ = false;   // drop pointer into the about-to-be-freed instance
+    rewind_ring_.clear(); rewind_replay_ = false;             // don't rewind across a reboot
+    const bool had_content = content_loaded_;
+    const std::string path = content_path_;
+    content_loaded_ = false;
+    loader_.destroy();                                        // frees the old core instance
+    if (loader_.load(module_.get(), err) != RP_OK)   { unload_core(); return RP_ERR_INTERNAL; }
+    if (loader_.create(&host_iface_, err) != RP_OK)  { unload_core(); return RP_ERR_INTERNAL; }
+    rp_result r = finish_load_core(core_type_, err);         // rebuilds surfaces/av-info/audio like a fresh boot
+    if (r != RP_OK) return r;                                // finish_load_core already unloads on failure
+    if (had_content) { content_path_ = path; return load_content(path.c_str()); }
+    return RP_OK;
 }
 
 } // namespace rp
@@ -426,5 +497,12 @@ rp_result rp_runtime_set_rewind(rp_runtime* rt, int enabled, uint32_t max_snapsh
 rp_result rp_runtime_rewind(rp_runtime* rt) {
     if (!rt) return RP_ERR_BAD_ARG;
     return reinterpret_cast<Runtime*>(rt)->rewind();
+}
+rp_result rp_runtime_pause (rp_runtime* rt) { return rt ? reinterpret_cast<Runtime*>(rt)->pause()  : RP_ERR_BAD_ARG; }
+rp_result rp_runtime_resume(rp_runtime* rt) { return rt ? reinterpret_cast<Runtime*>(rt)->resume() : RP_ERR_BAD_ARG; }
+rp_result rp_runtime_reset (rp_runtime* rt) { return rt ? reinterpret_cast<Runtime*>(rt)->reset()  : RP_ERR_BAD_ARG; }
+rp_result rp_runtime_get_status(rp_runtime* rt, rp_runtime_status* out) {
+    if (!rt) return RP_ERR_BAD_ARG;
+    return reinterpret_cast<Runtime*>(rt)->get_status(out);
 }
 }

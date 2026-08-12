@@ -56,6 +56,11 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 printf("[harness] load state: %s\n", r == RP_OK ? "ok" : "failed");
             }
             fflush(stdout);
+        } else if (w == 'P') {                    // toggle pause
+            rp_runtime_status st{}; rp_runtime_get_status(g_rt, &st);
+            if (st.paused) rp_runtime_resume(g_rt); else rp_runtime_pause(g_rt);
+        } else if (w == VK_F8) {                  // reset
+            rp_runtime_reset(g_rt);
         }
     }
     return DefWindowProc(h, m, w, l);

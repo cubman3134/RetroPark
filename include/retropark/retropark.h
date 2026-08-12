@@ -69,6 +69,26 @@ rp_result rp_runtime_set_rewind(rp_runtime* rt, int enabled, uint32_t max_snapsh
    RP_ERR_NOT_FOUND when there is no history left to step back to. */
 rp_result rp_runtime_rewind(rp_runtime* rt);
 
+/* --- Runtime control (frontend builds hotkeys/menus on top of these) --------------------------------- */
+/* Pause/resume the running core. Driven: advancing stops (last frame re-composites). Presenting: the
+   compositor freezes on the last frame and forwarded audio is muted; the core keeps simulating underneath.
+   Idempotent; RP_OK with no content loaded (no-op). */
+rp_result rp_runtime_pause (rp_runtime* rt);
+rp_result rp_runtime_resume(rp_runtime* rt);
+/* Reboot the current content (Phase 1: full stop + reload of the same path). Clears pause. RP_OK with no
+   content loaded (no-op). */
+rp_result rp_runtime_reset (rp_runtime* rt);
+
+typedef struct rp_runtime_status {
+    uint32_t core_type;       /* rp_core_type */
+    uint32_t graphics_api;    /* rp_graphics_api */
+    int32_t  paused;          /* 0/1 */
+    int32_t  content_loaded;  /* 0/1 */
+    double   fps;             /* measured present rate (0 until measured) */
+} rp_runtime_status;
+/* Fill *out with the runtime's current state. RP_ERR_BAD_ARG if rt or out is null. */
+rp_result rp_runtime_get_status(rp_runtime* rt, rp_runtime_status* out);
+
 #ifdef __cplusplus
 }
 #endif
