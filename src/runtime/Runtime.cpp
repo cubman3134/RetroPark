@@ -62,7 +62,7 @@ void Runtime::on_video_refresh(const void* data, uint32_t w, uint32_t h, uint32_
     dr_w_ = w; dr_h_ = h; dr_pitch_ = pitch;
 }
 void Runtime::on_audio_sample(const int16_t* frames, size_t n) {
-    if (suppress_audio_) return;           // silent re-simulation during rollback
+    if (suppress_audio_ || paused_) return; // rollback silence OR paused mute
     if (!frames || n == 0) return;
     audio_frames_ += n;
     if (!audio_nonsilent_) {
@@ -303,7 +303,15 @@ rp_result Runtime::render(uint8_t* out_rgba) {
                                           dr_w_, dr_h_, dr_pitch_, dupe, out_rgba, err);
     }
     uint32_t idx = 0; uint64_t sv = 0;
-    bool has = ring_.latest_ready(idx, sv);
+    bool has;
+    if (paused_) {
+        // Re-present the LAST acquired frame (a repeat): composite_and_present re-composites
+        // surfaces_[idx] without re-acquiring / advancing the timeline. Nothing yet => black.
+        idx = last_ready_idx_; sv = last_ready_sv_; has = have_last_ready_;
+    } else {
+        has = ring_.latest_ready(idx, sv);
+        if (has) { last_ready_idx_ = idx; last_ready_sv_ = sv; have_last_ready_ = true; }
+    }
     return backend_->composite_and_present(idx, sv, has, out_rgba, err);
 }
 
