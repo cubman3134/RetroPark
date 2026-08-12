@@ -53,6 +53,21 @@ TEST_CASE("runtime control: driven pause freezes the frame") {
     rp_runtime_destroy(rt);
 }
 
+TEST_CASE("runtime control: reset reboots content") {
+    rp_runtime* rt = rp_runtime_create(RP_GFX_VULKAN, nullptr);
+    REQUIRE(rt);
+    REQUIRE(rp_runtime_resize(rt, 64, 64) == RP_OK);
+    REQUIRE(rp_runtime_load_core(rt, RP_DRIVEN_CORE_DIR) == RP_OK);   // content-free driven ref core
+    std::vector<uint8_t> first(64*64*4), later(64*64*4), afterReset(64*64*4);
+    REQUIRE(rp_runtime_present(rt, first.data()) == RP_OK);
+    for (int i = 0; i < 10; i++) rp_runtime_present(rt, later.data());
+    CHECK(first != later);
+    REQUIRE(rp_runtime_reset(rt) == RP_OK);
+    REQUIRE(rp_runtime_present(rt, afterReset.data()) == RP_OK);
+    CHECK(afterReset == first);                      // rebooted to frame 0
+    rp_runtime_destroy(rt);
+}
+
 TEST_CASE("runtime control: presenting pause freezes the frame") {
     using namespace std::chrono_literals;
     rp_runtime* rt = rp_runtime_create(RP_GFX_VULKAN, nullptr);

@@ -145,7 +145,9 @@ rp_result Runtime::load_core(const std::string& core_dir) {
         module_.reset();
         return RP_ERR_INTERNAL;
     }
-    return finish_load_core(m.type, err);   // `m` = the CoreManifest; its .type feeds the shared branch logic
+    rp_result r = finish_load_core(m.type, err);   // `m` = the CoreManifest; its .type feeds the shared branch logic
+    if (r == RP_OK) { core_dir_ = core_dir; core_id_.clear(); }
+    return r;
 }
 
 rp_result Runtime::finish_load_core(rp_core_type type, std::string& err) {
@@ -204,7 +206,9 @@ rp_result Runtime::load_static_core(const std::string& core_id) {
         loader_.destroy(); module_.reset(); return RP_ERR_UNSUPPORTED;   // presenting core must match runtime api
     }
     if (loader_.create(&host_iface_, err) != RP_OK) { loader_.destroy(); module_.reset(); return RP_ERR_INTERNAL; }
-    return finish_load_core((rp_core_type)info.type, err);
+    rp_result r = finish_load_core((rp_core_type)info.type, err);
+    if (r == RP_OK) { core_id_ = core_id; core_dir_.clear(); }
+    return r;
 }
 
 rp_result Runtime::unload_core() {
@@ -227,6 +231,7 @@ rp_result Runtime::unload_core() {
 
 rp_result Runtime::load_content(const char* path) {
     if (!core_loaded_) return RP_ERR_INTERNAL;
+    content_path_ = path ? path : "";   // remembered so reset() can reboot the same content
     std::string err;
     if (core_type_ == RP_CORE_PRESENTING) {
         // A presenting content core (e.g. dolphin_present): hand it the content, then start it —
@@ -385,7 +390,27 @@ rp_result Runtime::get_status(rp_runtime_status* out) {
     return RP_OK;
 }
 
-rp_result Runtime::reset() { return RP_OK; }   // Task 4
+rp_result Runtime::reset() {
+    if (!core_loaded_) { paused_ = false; return RP_OK; }
+    std::string err;
+    paused_ = false;
+    have_last_ready_ = false;
+    if (content_loaded_) {
+        // Reboot the loaded content. For a presenting content core stop the running instance
+        // first (surfaces stay valid), then re-run the content-load+start path.
+        if (core_type_ == RP_CORE_PRESENTING && loader_.state() == LoaderState::Started) loader_.stop(err);
+        content_loaded_ = false;
+        return load_content(content_path_.c_str());
+    }
+    // Content-free core (e.g. refcore_driven): in-place reboot of the core instance, no DLL
+    // reload. destroy() nulls the loader's abi_/module_ and returns it to Unloaded, so the
+    // still-owned module_ must be re-loaded before create(); finish_load_core rebuilds the
+    // driven/presenting post-create state exactly as a fresh boot does.
+    loader_.destroy();
+    if (loader_.load(module_.get(), err) != RP_OK) return RP_ERR_INTERNAL;
+    if (loader_.create(&host_iface_, err) != RP_OK) return RP_ERR_INTERNAL;
+    return finish_load_core(core_type_, err);
+}
 
 } // namespace rp
 
