@@ -54,6 +54,7 @@ private:
     rp_result rebuild_surfaces(std::string& err);
     rp_result finish_load_core(rp_core_type type, std::string& err);  // shared post-create logic
     void open_audio(const rp_av_info& av);
+    void tick_fps();  // rolling ~0.5s present-rate measure; cheap, no alloc/lock
 
     void* native_window_ = nullptr;
     rp_graphics_api api_;

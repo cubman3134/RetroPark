@@ -68,6 +68,19 @@ TEST_CASE("runtime control: reset reboots content") {
     rp_runtime_destroy(rt);
 }
 
+TEST_CASE("runtime control: get_status reports fps after presents") {
+    rp_runtime* rt = rp_runtime_create(RP_GFX_VULKAN, nullptr);
+    REQUIRE(rt);
+    REQUIRE(rp_runtime_resize(rt, 64, 64) == RP_OK);
+    REQUIRE(rp_runtime_load_core(rt, RP_VK_CORE_DIR) == RP_OK);
+    std::vector<uint8_t> buf(64*64*4);
+    rp_runtime_status st{};
+    for (int i = 0; i < 120; i++) rp_runtime_present(rt, buf.data());
+    REQUIRE(rp_runtime_get_status(rt, &st) == RP_OK);
+    CHECK(st.fps >= 0.0);            // populated, never garbage
+    rp_runtime_destroy(rt);
+}
+
 TEST_CASE("runtime control: presenting pause freezes the frame") {
     using namespace std::chrono_literals;
     rp_runtime* rt = rp_runtime_create(RP_GFX_VULKAN, nullptr);

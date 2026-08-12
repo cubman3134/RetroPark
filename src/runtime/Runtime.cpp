@@ -8,6 +8,7 @@
 #include <sstream>
 #include <cstring>
 #include <algorithm>
+#include <chrono>
 
 namespace rp {
 
@@ -226,6 +227,7 @@ rp_result Runtime::unload_core() {
     audio_frames_ = 0; audio_nonsilent_ = false;
     rewind_ring_.clear();
     rewind_enabled_ = false; rewind_replay_ = false; rewind_max_ = 0;
+    fps_ = 0.0; fps_t0_ns_ = 0; fps_count_ = 0;
     return RP_OK;
 }
 
@@ -294,7 +296,20 @@ rp_result Runtime::advance(int emit_audio) {
     return r;
 }
 
+void Runtime::tick_fps() {
+    using namespace std::chrono;
+    uint64_t now = (uint64_t)duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
+    if (fps_t0_ns_ == 0) { fps_t0_ns_ = now; fps_count_ = 0; return; }
+    fps_count_++;
+    uint64_t dt = now - fps_t0_ns_;
+    if (dt >= 500000000ull) {                    // 0.5s window
+        fps_ = (double)fps_count_ * 1e9 / (double)dt;
+        fps_t0_ns_ = now; fps_count_ = 0;
+    }
+}
+
 rp_result Runtime::render(uint8_t* out_rgba) {
+    tick_fps();
     if (!backend_) return RP_ERR_DEVICE;
     std::string err;
     if (core_loaded_ && core_type_ == RP_CORE_DRIVEN) {
@@ -391,10 +406,11 @@ rp_result Runtime::get_status(rp_runtime_status* out) {
 }
 
 rp_result Runtime::reset() {
-    if (!core_loaded_) { paused_ = false; return RP_OK; }
+    if (!core_loaded_) { paused_ = false; fps_ = 0.0; fps_t0_ns_ = 0; fps_count_ = 0; return RP_OK; }
     std::string err;
     paused_ = false;
     have_last_ready_ = false;
+    fps_ = 0.0; fps_t0_ns_ = 0; fps_count_ = 0;
     if (content_loaded_) {
         // Reboot the loaded content. For a presenting content core stop the running instance
         // first (surfaces stay valid), then re-run the content-load+start path.
