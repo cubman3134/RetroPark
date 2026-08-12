@@ -362,6 +362,21 @@ rp_result Runtime::rewind() {
     return r;
 }
 
+rp_result Runtime::pause()  { if (core_loaded_) paused_ = true;  return RP_OK; }
+rp_result Runtime::resume() { paused_ = false; return RP_OK; }
+
+rp_result Runtime::get_status(rp_runtime_status* out) {
+    if (!out) return RP_ERR_BAD_ARG;
+    out->core_type      = (uint32_t)core_type_;
+    out->graphics_api   = (uint32_t)api_;
+    out->paused         = paused_ ? 1 : 0;
+    out->content_loaded = content_loaded_ ? 1 : 0;
+    out->fps            = fps_;
+    return RP_OK;
+}
+
+rp_result Runtime::reset() { return RP_OK; }   // Task 4
+
 } // namespace rp
 
 // ---- C API ----
@@ -426,5 +441,12 @@ rp_result rp_runtime_set_rewind(rp_runtime* rt, int enabled, uint32_t max_snapsh
 rp_result rp_runtime_rewind(rp_runtime* rt) {
     if (!rt) return RP_ERR_BAD_ARG;
     return reinterpret_cast<Runtime*>(rt)->rewind();
+}
+rp_result rp_runtime_pause (rp_runtime* rt) { return rt ? reinterpret_cast<Runtime*>(rt)->pause()  : RP_ERR_BAD_ARG; }
+rp_result rp_runtime_resume(rp_runtime* rt) { return rt ? reinterpret_cast<Runtime*>(rt)->resume() : RP_ERR_BAD_ARG; }
+rp_result rp_runtime_reset (rp_runtime* rt) { return rt ? reinterpret_cast<Runtime*>(rt)->reset()  : RP_ERR_BAD_ARG; }
+rp_result rp_runtime_get_status(rp_runtime* rt, rp_runtime_status* out) {
+    if (!rt) return RP_ERR_BAD_ARG;
+    return reinterpret_cast<Runtime*>(rt)->get_status(out);
 }
 }

@@ -18,6 +18,7 @@ add_executable(retropark_tests
   test_vulkan_handoff.cpp
   test_vulkan_compositor.cpp
   test_vulkan_e2e.cpp
+  test_runtime_control.cpp
   test_driven_upload_d3d11.cpp
   test_driven_upload_vulkan.cpp
   test_driven_e2e.cpp
