@@ -309,8 +309,10 @@ rp_result Runtime::render(uint8_t* out_rgba) {
 
 rp_result Runtime::present(uint8_t* out_rgba) {
     if (core_loaded_ && core_type_ == RP_CORE_DRIVEN) {
-        rp_result r = advance(1);
-        if (r != RP_OK) return r;
+        if (!paused_) {                     // paused: do not advance; re-composite the retained frame
+            rp_result r = advance(1);
+            if (r != RP_OK) return r;
+        }
         return render(out_rgba);
     }
     return render(out_rgba);                // presenting: composite_and_present, unchanged
