@@ -3,12 +3,34 @@
 #include <vector>
 #include <thread>
 #include <chrono>
+#include <string>
+#include <filesystem>
+#include <fstream>
 #ifndef RP_VK_CORE_DIR
 #define RP_VK_CORE_DIR "."
 #endif
 #ifndef RP_DRIVEN_CORE_DIR
 #define RP_DRIVEN_CORE_DIR "cores/refcore_driven"
 #endif
+#ifndef RP_SHIM_DIR
+#define RP_SHIM_DIR "."
+#endif
+#ifndef RP_NES_ROM_DIR
+#define RP_NES_ROM_DIR "C:/RetroBat/roms/nes"
+#endif
+
+static std::string ctrl_first_nes(const std::string& dir) {
+    std::error_code ec;
+    if (!std::filesystem::exists(dir, ec)) return {};
+    for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+        if (ec) break;
+        if (e.is_regular_file() && e.path().extension() == ".nes") return e.path().string();
+    }
+    return {};
+}
+static bool ctrl_file_exists(const std::string& p) {
+    std::ifstream f(p, std::ios::binary); return (bool)f;
+}
 
 TEST_CASE("runtime control: get_status reflects core type + pause flag") {
     rp_runtime* rt = rp_runtime_create(RP_GFX_VULKAN, nullptr);
@@ -65,6 +87,39 @@ TEST_CASE("runtime control: reset reboots content") {
     REQUIRE(rp_runtime_reset(rt) == RP_OK);
     REQUIRE(rp_runtime_present(rt, afterReset.data()) == RP_OK);
     CHECK(afterReset == first);                      // rebooted to frame 0
+    rp_runtime_destroy(rt);
+}
+
+TEST_CASE("runtime control: reset reboots a driven CONTENT core (full teardown)") {
+    // Exercises the unified reset() teardown on a driven core that TAKES content (the libretro
+    // shim + a real NES ROM). The old reset() re-ran load_content on a still-live driven
+    // instance (a second retro_load_game); the fix destroys+re-creates the core, so a byte-
+    // identical boot frame after reset proves the reboot returned to a clean frame-0 state.
+    // Skips cleanly where the shim/ROM fixture is absent (matches test_libretro_e2e).
+    std::string rom = ctrl_first_nes(RP_NES_ROM_DIR);
+    if (rom.empty() || !ctrl_file_exists(std::string(RP_SHIM_DIR) + "/fceumm_libretro.dll")) {
+        WARN("no shim/rom; skip driven-content reset");
+        return;
+    }
+    const uint32_t W = 256, H = 240;   // NES resolution
+    rp_runtime* rt = rp_runtime_create(RP_GFX_VULKAN, nullptr);
+    REQUIRE(rt);
+    REQUIRE(rp_runtime_resize(rt, W, H) == RP_OK);
+    REQUIRE(rp_runtime_load_core(rt, RP_SHIM_DIR) == RP_OK);
+    REQUIRE(rp_runtime_load_content(rt, rom.c_str()) == RP_OK);
+    std::vector<uint8_t> boot((size_t)W*H*4, 0), later((size_t)W*H*4, 0), afterReset((size_t)W*H*4, 0);
+    REQUIRE(rp_runtime_present(rt, boot.data()) == RP_OK);   // deterministic frame 0 of a fresh boot
+    // Advance until the frame animates, proving real emulation is running before the reboot.
+    for (int i = 0; i < 1000; i++) { rp_runtime_present(rt, later.data()); if (later != boot) break; }
+    CHECK(boot != later);
+    // Full-teardown reboot: destroy -> reload DLL -> re-create -> finish_load_core -> re-load ROM.
+    REQUIRE(rp_runtime_reset(rt) == RP_OK);
+    rp_runtime_status st{};
+    REQUIRE(rp_runtime_get_status(rt, &st) == RP_OK);
+    CHECK(st.content_loaded == 1);                          // content re-loaded across the reboot
+    REQUIRE(rp_runtime_present(rt, afterReset.data()) == RP_OK);
+    CHECK(afterReset == boot);                              // rebooted to a byte-identical frame 0
+    rp_runtime_unload_core(rt);
     rp_runtime_destroy(rt);
 }
 

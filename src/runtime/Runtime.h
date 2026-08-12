@@ -89,7 +89,8 @@ private:
                                         // restored frame and must NOT capture it
     uint32_t rewind_max_     = 0;
 
-    bool paused_ = false;
+    std::atomic<bool> paused_{false};  // read on the audio puller thread (on_audio_sample) while
+                                       // written from the frontend thread (pause/resume/reset)
     std::string content_path_;   // last-loaded content path, for reset()
     std::string core_dir_;       // last dynamic core dir (reset fallback; empty for static)
     std::string core_id_;        // last static core id (empty for dynamic)

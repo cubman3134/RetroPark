@@ -93,6 +93,7 @@ rp_result Runtime::rebuild_surfaces(std::string& err) {
     rp_result r = backend_->allocate_surfaces(ring_.slot_count(), width_, height_, descs, err);
     if (r != RP_OK) return r;
     uint64_t gen = ring_.reallocate(width_, height_);
+    have_last_ready_ = false;   // ring timeline was just rebuilt; a stale (idx,sv) would misfire
     for (auto& d : descs) d.generation = gen;
     if (loader_.state() == LoaderState::Created) {
         rp_surface_set set{};
@@ -228,6 +229,9 @@ rp_result Runtime::unload_core() {
     rewind_ring_.clear();
     rewind_enabled_ = false; rewind_replay_ = false; rewind_max_ = 0;
     fps_ = 0.0; fps_t0_ns_ = 0; fps_count_ = 0;
+    paused_ = false;
+    have_last_ready_ = false; last_ready_idx_ = 0; last_ready_sv_ = 0;
+    content_path_.clear();
     return RP_OK;
 }
 
@@ -407,25 +411,26 @@ rp_result Runtime::get_status(rp_runtime_status* out) {
 
 rp_result Runtime::reset() {
     if (!core_loaded_) { paused_ = false; fps_ = 0.0; fps_t0_ns_ = 0; fps_count_ = 0; return RP_OK; }
+    // Unified full-teardown reboot: EVERY case (driven/presenting, content or content-free) goes
+    // through destroy -> re-create -> finish_load_core -> (re-load content). This avoids re-running
+    // load_content on a still-live driven instance (a second retro_load_game on the same core), and
+    // guarantees no pointer into the freed instance (dr_data_) or pre-reboot ring frame survives.
     std::string err;
     paused_ = false;
-    have_last_ready_ = false;
+    have_last_ready_ = false; last_ready_idx_ = 0; last_ready_sv_ = 0;
     fps_ = 0.0; fps_t0_ns_ = 0; fps_count_ = 0;
-    if (content_loaded_) {
-        // Reboot the loaded content. For a presenting content core stop the running instance
-        // first (surfaces stay valid), then re-run the content-load+start path.
-        if (core_type_ == RP_CORE_PRESENTING && loader_.state() == LoaderState::Started) loader_.stop(err);
-        content_loaded_ = false;
-        return load_content(content_path_.c_str());
-    }
-    // Content-free core (e.g. refcore_driven): in-place reboot of the core instance, no DLL
-    // reload. destroy() nulls the loader's abi_/module_ and returns it to Unloaded, so the
-    // still-owned module_ must be re-loaded before create(); finish_load_core rebuilds the
-    // driven/presenting post-create state exactly as a fresh boot does.
-    loader_.destroy();
-    if (loader_.load(module_.get(), err) != RP_OK) return RP_ERR_INTERNAL;
-    if (loader_.create(&host_iface_, err) != RP_OK) return RP_ERR_INTERNAL;
-    return finish_load_core(core_type_, err);
+    dr_have_ = false; dr_data_ = nullptr; dr_dupe_ = false;   // drop pointer into the about-to-be-freed instance
+    rewind_ring_.clear(); rewind_replay_ = false;             // don't rewind across a reboot
+    const bool had_content = content_loaded_;
+    const std::string path = content_path_;
+    content_loaded_ = false;
+    loader_.destroy();                                        // frees the old core instance
+    if (loader_.load(module_.get(), err) != RP_OK)   { unload_core(); return RP_ERR_INTERNAL; }
+    if (loader_.create(&host_iface_, err) != RP_OK)  { unload_core(); return RP_ERR_INTERNAL; }
+    rp_result r = finish_load_core(core_type_, err);         // rebuilds surfaces/av-info/audio like a fresh boot
+    if (r != RP_OK) return r;                                // finish_load_core already unloads on failure
+    if (had_content) { content_path_ = path; return load_content(path.c_str()); }
+    return RP_OK;
 }
 
 } // namespace rp
