@@ -30,7 +30,7 @@ rp_result pump_until_green(rp_runtime* rt, uint32_t W, uint32_t H, std::vector<u
 
 } // namespace
 
-TEST_CASE("e2e: reference core renders into our surface and we composite an overlay") {
+TEST_CASE("e2e: reference core renders into our surface") {
     if (!rp::D3D11Backend::probe_shared_keyed_mutex()) { WARN("no shared keyed mutex; skip"); return; }
     const uint32_t W=64, H=64;
     rp_runtime* rt = rp_runtime_create(RP_GFX_D3D11, nullptr);
@@ -52,11 +52,6 @@ TEST_CASE("e2e: reference core renders into our surface and we composite an over
     }
     CHECK(pr == RP_OK);
     CHECK(sawCore);
-
-    auto at=[&](uint32_t x,uint32_t y,int c){ return img[(y*W+x)*4+c]; };
-    // Overlay quadrant (top-left) shows a blue-ward blend over the core.
-    CHECK(at(4,4,2) > 80);
-    CHECK(at(4,4,1) < at(W-4,H-4,1));
 
     rp_runtime_unload_core(rt);
     rp_runtime_destroy(rt);
@@ -87,10 +82,6 @@ TEST_CASE("e2e: reloading the core on a live runtime cleanly tears down and rest
     CHECK(pr2 == RP_OK);
     CHECK(sawCore2);
 
-    auto at2=[&](uint32_t x,uint32_t y,int c){ return img2[(y*W+x)*4+c]; };
-    CHECK(at2(4,4,2) > 80);
-    CHECK(at2(4,4,1) < at2(W-4,H-4,1));
-
     rp_runtime_unload_core(rt);
     rp_runtime_destroy(rt);
 }
@@ -112,10 +103,6 @@ TEST_CASE("e2e: a failed load does not brick the runtime for a real subsequent l
     rp_result pr = pump_until_green(rt, W, H, img, sawCore);
     CHECK(pr == RP_OK);
     CHECK(sawCore);
-
-    auto at=[&](uint32_t x,uint32_t y,int c){ return img[(y*W+x)*4+c]; };
-    CHECK(at(4,4,2) > 80);
-    CHECK(at(4,4,1) < at(W-4,H-4,1));
 
     rp_runtime_unload_core(rt);
     rp_runtime_destroy(rt);

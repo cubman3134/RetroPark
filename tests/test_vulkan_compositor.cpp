@@ -9,9 +9,9 @@ using namespace rp;
 // Vulkan analog of test_compositor.cpp (D3D11): a second VkDevice on the same
 // physical device imports the host's exported image + timeline, clears the shared
 // image green on the GPU, and signals the timeline to 2. The host then runs
-// composite_and_present (QFOT-acquiring the core image, sampling it, drawing the
-// blended overlay quad, reading the result back headless) and the test proves the
-// overlay genuinely BLENDS rather than just layering opaquely.
+// composite_and_present (QFOT-acquiring the core image, sampling it, reading the
+// result back headless) and the test proves the core frame composites into our
+// surface.
 
 namespace {
 
@@ -205,7 +205,7 @@ static bool vk_test_producer_clear(void* mem_handle, void* sem_handle,
 
 } // namespace
 
-TEST_CASE("vulkan compositor: core frame shows and overlay blends over it") {
+TEST_CASE("vulkan compositor: core frame composites into our surface") {
     if (!VulkanBackend::probe_vulkan_shared()) { WARN("no capable Vulkan device; skipping"); return; }
 
     const uint32_t W = 64, H = 64;
@@ -231,10 +231,7 @@ TEST_CASE("vulkan compositor: core frame shows and overlay blends over it") {
                                        img.data(), err) == RP_OK);
 
     auto at = [&](uint32_t x, uint32_t y, int c) { return img[(y * W + x) * 4 + c]; };
-    // Bottom-right quadrant: no overlay -> pure green.
+    // The core green frame composited into our surface -> pure green.
     CHECK(at(60, 60, 1) > 200);            // G high
     CHECK(at(60, 60, 2) < 60);             // B low
-    // Top-left quadrant: overlay blended over green -> blue raised, green reduced.
-    CHECK(at(4, 4, 2) > 80);               // B raised by overlay
-    CHECK(at(4, 4, 1) < at(60, 60, 1));    // G reduced vs the non-overlay region
 }

@@ -1,15 +1,9 @@
 #include "render/vulkan/VulkanCompositor.h"
 #include "vk_fullscreen_vert_generated.h"
 #include "vk_sample_frag_generated.h"
-#include "vk_overlay_vert_generated.h"
-#include "vk_overlay_frag_generated.h"
 #include <cstring>
 
 namespace rp {
-
-// Mirrors the `P { vec4 rect; vec4 color; }` push-constant block shared by
-// overlay.vert/overlay.frag.
-struct OverlayPush { float rect[4]; float color[4]; };
 
 static rp_result make_shader(VkDevice dev, const unsigned int* code, unsigned long words,
                              VkShaderModule& out, std::string& err) {
@@ -25,8 +19,6 @@ rp_result VulkanCompositor::initialize(VkDevice dev, VkFormat color_format, std:
     rp_result r;
     if ((r = make_shader(dev_, vk_fullscreen_vert, vk_fullscreen_vert_len, fs_vert_, err)) != RP_OK) return r;
     if ((r = make_shader(dev_, vk_sample_frag, vk_sample_frag_len, sample_frag_, err)) != RP_OK) return r;
-    if ((r = make_shader(dev_, vk_overlay_vert, vk_overlay_vert_len, ov_vert_, err)) != RP_OK) return r;
-    if ((r = make_shader(dev_, vk_overlay_frag, vk_overlay_frag_len, ov_frag_, err)) != RP_OK) return r;
 
     // Descriptor set layout: one combined image sampler, sampled only in the frag stage.
     VkDescriptorSetLayoutBinding binding{};
@@ -83,16 +75,10 @@ rp_result VulkanCompositor::initialize(VkDevice dev, VkFormat color_format, std:
     rpci.dependencyCount = 1; rpci.pDependencies = &dep;
     VK_CHECK(vkCreateRenderPass(dev_, &rpci, nullptr, &render_pass_), err, "render pass");
 
-    // Pipeline layouts: the core pass samples the descriptor set; the overlay pass
-    // only consumes push constants.
+    // Pipeline layout: the core pass samples the descriptor set.
     VkPipelineLayoutCreateInfo coreLci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     coreLci.setLayoutCount = 1; coreLci.pSetLayouts = &set_layout_;
     VK_CHECK(vkCreatePipelineLayout(dev_, &coreLci, nullptr, &core_layout_), err, "core pipeline layout");
-
-    VkPushConstantRange pcRange{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(OverlayPush)};
-    VkPipelineLayoutCreateInfo ovLci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    ovLci.pushConstantRangeCount = 1; ovLci.pPushConstantRanges = &pcRange;
-    VK_CHECK(vkCreatePipelineLayout(dev_, &ovLci, nullptr, &overlay_layout_), err, "overlay pipeline layout");
 
     // Shared fixed-function state: no vertex buffers (both shaders build vertices from
     // gl_VertexIndex), dynamic viewport/scissor (render() is called at arbitrary w x h).
@@ -143,45 +129,6 @@ rp_result VulkanCompositor::initialize(VkDevice dev, VkFormat color_format, std:
     VK_CHECK(vkCreateGraphicsPipelines(dev_, VK_NULL_HANDLE, 1, &coreGpci, nullptr, &core_pipeline_),
              err, "core pipeline");
 
-    // Overlay pipeline: top-left-quadrant quad (triangle strip), src_alpha/one_minus_src_alpha blend.
-    VkPipelineColorBlendAttachmentState blend{};
-    blend.blendEnable = VK_TRUE;
-    blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-    blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-    blend.colorBlendOp = VK_BLEND_OP_ADD;
-    blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-    blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-    blend.alphaBlendOp = VK_BLEND_OP_ADD;
-    blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    VkPipelineColorBlendStateCreateInfo ovBlendState{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-    ovBlendState.attachmentCount = 1; ovBlendState.pAttachments = &blend;
-
-    VkPipelineInputAssemblyStateCreateInfo iaStrip{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-    iaStrip.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
-
-    VkPipelineShaderStageCreateInfo ovStages[2] = {
-        VkPipelineShaderStageCreateInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},
-        VkPipelineShaderStageCreateInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},
-    };
-    ovStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT; ovStages[0].module = ov_vert_; ovStages[0].pName = "main";
-    ovStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; ovStages[1].module = ov_frag_; ovStages[1].pName = "main";
-
-    VkGraphicsPipelineCreateInfo ovGpci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-    ovGpci.stageCount = 2; ovGpci.pStages = ovStages;
-    ovGpci.pVertexInputState = &vi;
-    ovGpci.pInputAssemblyState = &iaStrip;
-    ovGpci.pViewportState = &vpState;
-    ovGpci.pRasterizationState = &rs;
-    ovGpci.pMultisampleState = &ms;
-    ovGpci.pColorBlendState = &ovBlendState;
-    ovGpci.pDynamicState = &dyn;
-    ovGpci.layout = overlay_layout_;
-    ovGpci.renderPass = render_pass_;
-    ovGpci.subpass = 0;
-    VK_CHECK(vkCreateGraphicsPipelines(dev_, VK_NULL_HANDLE, 1, &ovGpci, nullptr, &overlay_pipeline_),
-             err, "overlay pipeline");
-
     return RP_OK;
 }
 
@@ -228,14 +175,6 @@ rp_result VulkanCompositor::render(VkCommandBuffer cmd, VkImageView targetView, 
         vkCmdDraw(cmd, 3, 1, 0, 0);
     }
 
-    OverlayPush push{};
-    push.rect[0] = -1.0f; push.rect[1] = -1.0f; push.rect[2] = 0.0f; push.rect[3] = 0.0f;
-    push.color[0] = 0.0f; push.color[1] = 0.0f; push.color[2] = 1.0f; push.color[3] = 0.5f;
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, overlay_pipeline_);
-    vkCmdPushConstants(cmd, overlay_layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                       0, sizeof(push), &push);
-    vkCmdDraw(cmd, 4, 1, 0, 0);
-
     vkCmdEndRenderPass(cmd);
     return RP_OK;
 }
@@ -243,26 +182,21 @@ rp_result VulkanCompositor::render(VkCommandBuffer cmd, VkImageView targetView, 
 void VulkanCompositor::destroy() {
     if (!dev_) return;
     if (framebuffer_) vkDestroyFramebuffer(dev_, framebuffer_, nullptr);
-    if (overlay_pipeline_) vkDestroyPipeline(dev_, overlay_pipeline_, nullptr);
     if (core_pipeline_) vkDestroyPipeline(dev_, core_pipeline_, nullptr);
-    if (overlay_layout_) vkDestroyPipelineLayout(dev_, overlay_layout_, nullptr);
     if (core_layout_) vkDestroyPipelineLayout(dev_, core_layout_, nullptr);
     if (render_pass_) vkDestroyRenderPass(dev_, render_pass_, nullptr);
     if (desc_pool_) vkDestroyDescriptorPool(dev_, desc_pool_, nullptr);   // frees desc_set_ too
     if (sampler_) vkDestroySampler(dev_, sampler_, nullptr);
     if (set_layout_) vkDestroyDescriptorSetLayout(dev_, set_layout_, nullptr);
-    if (ov_frag_) vkDestroyShaderModule(dev_, ov_frag_, nullptr);
-    if (ov_vert_) vkDestroyShaderModule(dev_, ov_vert_, nullptr);
     if (sample_frag_) vkDestroyShaderModule(dev_, sample_frag_, nullptr);
     if (fs_vert_) vkDestroyShaderModule(dev_, fs_vert_, nullptr);
 
     framebuffer_ = VK_NULL_HANDLE;
-    overlay_pipeline_ = VK_NULL_HANDLE; core_pipeline_ = VK_NULL_HANDLE;
-    overlay_layout_ = VK_NULL_HANDLE; core_layout_ = VK_NULL_HANDLE;
+    core_pipeline_ = VK_NULL_HANDLE;
+    core_layout_ = VK_NULL_HANDLE;
     render_pass_ = VK_NULL_HANDLE;
     desc_pool_ = VK_NULL_HANDLE; desc_set_ = VK_NULL_HANDLE;
     sampler_ = VK_NULL_HANDLE; set_layout_ = VK_NULL_HANDLE;
-    ov_frag_ = VK_NULL_HANDLE; ov_vert_ = VK_NULL_HANDLE;
     sample_frag_ = VK_NULL_HANDLE; fs_vert_ = VK_NULL_HANDLE;
     dev_ = VK_NULL_HANDLE;
 }

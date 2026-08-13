@@ -11,10 +11,8 @@ public:
     rp_result render(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* target,
                      ID3D11ShaderResourceView* core_srv, uint32_t w, uint32_t h, std::string& err);
 private:
-    Microsoft::WRL::ComPtr<ID3D11VertexShader> fs_vs_, ov_vs_;
-    Microsoft::WRL::ComPtr<ID3D11PixelShader>  sample_ps_, ov_ps_;
+    Microsoft::WRL::ComPtr<ID3D11VertexShader> fs_vs_;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader>  sample_ps_;
     Microsoft::WRL::ComPtr<ID3D11SamplerState> sampler_;
-    Microsoft::WRL::ComPtr<ID3D11BlendState>   blend_;
-    Microsoft::WRL::ComPtr<ID3D11Buffer>       ov_cb_;
 };
 }

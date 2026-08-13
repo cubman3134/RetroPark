@@ -28,7 +28,7 @@ void        rp_runtime_set_input(rp_runtime* rt, uint32_t port, const rp_input_s
    Device-independent; used to prove a presenting core (e.g. Dolphin) is polling host input. */
 uint64_t    rp_runtime_input_poll_count(rp_runtime* rt);
 
-/* Composite latest core frame + overlay; if out_rgba != NULL copies the RGBA8 image. */
+/* Composite the latest core frame; if out_rgba != NULL copies the RGBA8 image. */
 rp_result   rp_runtime_present(rp_runtime* rt, uint8_t* out_rgba);
 
 /* Advance the driven core one frame (run_frame) WITHOUT compositing. emit_audio != 0 forwards the

@@ -3,7 +3,7 @@
 #include <vector>
 using namespace rp;
 
-TEST_CASE("d3d11 driven: uploaded framebuffer (padded pitch) shows + overlay blends") {
+TEST_CASE("d3d11 driven: uploaded framebuffer (padded pitch) composites into our surface") {
     const uint32_t W=64,H=64,PITCH=W*4 + 16;   // 16 bytes row padding
     D3D11Backend b; std::string err;
     REQUIRE(b.initialize(nullptr, W, H, err) == RP_OK);
@@ -15,15 +15,13 @@ TEST_CASE("d3d11 driven: uploaded framebuffer (padded pitch) shows + overlay ble
     std::vector<uint8_t> out((size_t)W*H*4, 0);
     REQUIRE(b.composite_driven(src.data(), W, H, PITCH, /*dupe=*/false, out.data(), err) == RP_OK);
     auto at=[&](std::vector<uint8_t>& buf, uint32_t x,uint32_t y,int c){ return buf[((size_t)y*W+x)*4+c]; };
-    CHECK(at(out,60,60,1) > 200); CHECK(at(out,60,60,2) < 60);      // green outside overlay
-    CHECK(at(out,4,4,2) > 80);    CHECK(at(out,4,4,1) < at(out,60,60,1)); // blended inside overlay
+    CHECK(at(out,60,60,1) > 200); CHECK(at(out,60,60,2) < 60);      // uploaded green composites
 
     // dupe==true must reuse the last uploaded texture (no new data supplied) and still
-    // composite correctly: green outside the overlay, blend inside it.
+    // composite the green frame correctly.
     std::vector<uint8_t> out2((size_t)W*H*4, 0);
     REQUIRE(b.composite_driven(nullptr, W, H, 0, /*dupe=*/true, out2.data(), err) == RP_OK);
     CHECK(at(out2,60,60,1) > 200); CHECK(at(out2,60,60,2) < 60);
-    CHECK(at(out2,4,4,2) > 80);    CHECK(at(out2,4,4,1) < at(out2,60,60,1));
 }
 
 TEST_CASE("d3d11 driven: core-res frame is scaled to fill a larger display target") {
@@ -44,8 +42,8 @@ TEST_CASE("d3d11 driven: core-res frame is scaled to fill a larger display targe
     std::vector<uint8_t> out((size_t)DW*DH*4, 0);
     REQUIRE(b.composite_driven(src.data(), CW, CH, CPITCH, /*dupe=*/false, out.data(), err) == RP_OK);
     auto at=[&](uint32_t x,uint32_t y,int c){ return out[((size_t)y*DW+x)*4+c]; };
-    // Bottom-right corner, well outside the overlay quadrant: only reachable by green if
-    // the 32x32 core frame was scaled up to fill the full 128x96 display target.
+    // Bottom-right corner: only reachable by green if the 32x32 core frame was scaled
+    // up to fill the full 128x96 display target.
     CHECK(at(120,90,1) > 200);
     CHECK(at(120,90,2) < 60);
 }

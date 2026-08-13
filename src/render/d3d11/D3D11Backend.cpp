@@ -252,8 +252,8 @@ rp_result D3D11Backend::composite_driven(const void* data, uint32_t width, uint3
                         static_cast<uint8_t*>(mapped.pData), mapped.RowPitch);
         ctx_->Unmap(driven_tex_.Get(), 0);
     }
-    // dupe==true with no frame yet (driven_srv_ still null) falls through and composites
-    // overlay-only, passing a null core SRV to the compositor.
+    // dupe==true with no frame yet (driven_srv_ still null) falls through and passes a
+    // null core SRV to the compositor, which then just clears to black.
 
     if (!compositor_ready_) {
         rp_result r = compositor_.initialize(device_.Get(), err);

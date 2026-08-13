@@ -19,7 +19,7 @@ using namespace rp;
 // DIRECTLY into RetroPark's exported shared VkImage (zero copy) via the Slice B timeline handoff.
 // dolphin_present.dll (a Dolphin-toolchain-built vehicle wrapping DolphinLib) is LoadLibrary'd
 // in-process; it imports our image + timeline and signals 2f+2 per frame; RetroPark's compositor
-// consumes at 2f+2, blends the overlay, signals 2f+3 (lock-step). We assert the readback is a real,
+// consumes at 2f+2, composites it, signals 2f+3 (lock-step). We assert the readback is a real,
 // changing rendered frame reaching our surface.
 
 namespace {
@@ -117,13 +117,4 @@ TEST_CASE("dolphin: renders Billy Hatcher into RetroPark's shared VkImage (gated
         for (size_t i = 0; i < late.size(); ++i) if (late[i] != early[i]) ++diff;
         CHECK(diff > late.size() / 20);           // frames differ -> real emulation advancing
     }
-    // Overlay blend: the compositor draws a blue @0.5-alpha quad over the top-left quadrant, so its
-    // mean blue is raised vs the untinted bottom-right quadrant (blending, not opaque layering).
-    auto mean_blue = [&](uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1) {
-        uint64_t sum = 0; uint32_t n = 0;
-        for (uint32_t y = y0; y < y1; ++y)
-            for (uint32_t x = x0; x < x1; ++x) { sum += late[(y * W + x) * 4 + 2]; ++n; }
-        return n ? double(sum) / n : 0.0;
-    };
-    CHECK(mean_blue(0, 0, W / 2, H / 2) > mean_blue(W / 2, H / 2, W, H) + 15.0);
 }

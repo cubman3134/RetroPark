@@ -8,8 +8,8 @@ using Microsoft::WRL::ComPtr;
 using namespace rp;
 
 // Fill the single core surface with solid green from a producer device, then
-// composite; assert green shows outside the overlay and a blue-ward blend inside it.
-TEST_CASE("compositor: core frame shows and overlay blends over it") {
+// composite; assert the core green frame shows in our readback.
+TEST_CASE("compositor: core frame composites into our surface") {
     if (!D3D11Backend::probe_shared_keyed_mutex()) { WARN("no shared keyed mutex; skip"); return; }
     const uint32_t W=64, H=64;
     D3D11Backend host; std::string err;
@@ -33,10 +33,7 @@ TEST_CASE("compositor: core frame shows and overlay blends over it") {
     REQUIRE(host.composite_and_present(/*ready_index=*/0, /*sync_value=*/0, /*has_frame=*/true, img.data(), err) == RP_OK);
 
     auto at = [&](uint32_t x, uint32_t y, int c){ return img[(y*W + x)*4 + c]; };
-    // Bottom-right quadrant: no overlay -> pure green.
+    // The core green frame composited into our surface -> pure green.
     CHECK(at(60, 60, 1) > 200);            // G high
     CHECK(at(60, 60, 2) < 60);             // B low
-    // Top-left quadrant: overlay blended over green -> blue raised, green reduced.
-    CHECK(at(4, 4, 2) > 80);               // B raised by overlay
-    CHECK(at(4, 4, 1) < at(60, 60, 1));    // G reduced vs the non-overlay region
 }

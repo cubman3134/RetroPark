@@ -62,13 +62,9 @@ set(VK_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/render/vulkan/shaders")
 set(VK_GEN_DIR "${CMAKE_BINARY_DIR}/gen")
 retropark_embed_shader("${VK_SHADER_DIR}/fullscreen.vert" vert "${VK_GEN_DIR}/vk_fullscreen_vert_generated.h" vk_fullscreen_vert)
 retropark_embed_shader("${VK_SHADER_DIR}/sample.frag" frag "${VK_GEN_DIR}/vk_sample_frag_generated.h" vk_sample_frag)
-retropark_embed_shader("${VK_SHADER_DIR}/overlay.vert" vert "${VK_GEN_DIR}/vk_overlay_vert_generated.h" vk_overlay_vert)
-retropark_embed_shader("${VK_SHADER_DIR}/overlay.frag" frag "${VK_GEN_DIR}/vk_overlay_frag_generated.h" vk_overlay_frag)
 add_custom_target(gen_vk_shaders DEPENDS
   "${VK_GEN_DIR}/vk_fullscreen_vert_generated.h"
-  "${VK_GEN_DIR}/vk_sample_frag_generated.h"
-  "${VK_GEN_DIR}/vk_overlay_vert_generated.h"
-  "${VK_GEN_DIR}/vk_overlay_frag_generated.h")
+  "${VK_GEN_DIR}/vk_sample_frag_generated.h")
 add_dependencies(retropark gen_vk_shaders)
 target_include_directories(retropark PRIVATE "${VK_GEN_DIR}")
 

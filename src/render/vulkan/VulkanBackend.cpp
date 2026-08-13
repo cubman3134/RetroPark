@@ -540,7 +540,7 @@ rp_result VulkanBackend::composite_and_present(uint32_t ready_index, uint64_t sy
     return RP_OK;
 }
 
-// Windowed present: acquire a swapchain image, composite the core frame + overlay
+// Windowed present: acquire a swapchain image, composite the core frame
 // straight into it (same compositor render used headless), transition it to
 // PRESENT_SRC, and present. The core-image handoff (QFOT acquire GENERAL->GENERAL +
 // timeline wait>=sync_value / signal sync_value+1) is byte-for-byte the headless
@@ -806,7 +806,7 @@ rp_result VulkanBackend::upload_driven_frame(const void* data, uint32_t width, u
     return RP_OK;
 }
 
-// Headless half of composite_driven(): renders the driven image (+ overlay) into the
+// Headless half of composite_driven(): renders the driven image into the
 // offscreen target at DISPLAY size (width_ x height_ — not the per-call core width/height;
 // the compositor's fullscreen triangle samples 0..1 UVs so the core frame scales to fill
 // it), then reads it back into out_rgba via the same offscreen->staging path
@@ -818,7 +818,7 @@ rp_result VulkanBackend::composite_driven_headless(uint8_t* out_rgba, std::strin
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     VK_CHECK(vkBeginCommandBuffer(composite_cmd_, &bi), err, "begin driven composite cmd");
 
-    // driven_view_ may be null here (dupe==true, never uploaded) -> overlay-only.
+    // driven_view_ may be null here (dupe==true, never uploaded) -> clears to black only.
     rp_result r = compositor_.render(composite_cmd_, offscreen_view_, driven_view_,
                                      width_, height_, err, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     if (r != RP_OK) { vkEndCommandBuffer(composite_cmd_); return r; }
@@ -841,8 +841,8 @@ rp_result VulkanBackend::composite_driven_headless(uint8_t* out_rgba, std::strin
     return RP_OK;
 }
 
-// Windowed half of composite_driven(): acquires a swap image, renders the driven image (+
-// overlay) into it at DISPLAY size (swap_extent_, mirroring present_windowed()), and
+// Windowed half of composite_driven(): acquires a swap image, renders the driven image
+// into it at DISPLAY size (swap_extent_, mirroring present_windowed()), and
 // presents. Unlike present_windowed(), there is no QFOT acquire and no shared timeline to
 // wait/signal — the driven image is a normal single-device sampled image, so only the
 // binary acquire/present semaphore pair is needed.
@@ -920,7 +920,7 @@ rp_result VulkanBackend::composite_driven(const void* data, uint32_t width, uint
         if (r != RP_OK) return r;
     }
     // dupe==true reuses driven_view_ as-is (no re-upload); if it was never populated
-    // (still VK_NULL_HANDLE), the compositor below gets a null core view -> overlay-only.
+    // (still VK_NULL_HANDLE), the compositor below gets a null core view -> clears to black.
 
     if (swapchain_) return present_driven_windowed(err);
     return composite_driven_headless(out_rgba, err);

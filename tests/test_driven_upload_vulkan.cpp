@@ -3,7 +3,7 @@
 #include <vector>
 using namespace rp;
 
-TEST_CASE("vulkan driven: uploaded framebuffer (padded pitch) shows + overlay blends") {
+TEST_CASE("vulkan driven: uploaded framebuffer (padded pitch) composites into our surface") {
     if (!VulkanBackend::probe_vulkan_shared()) { WARN("no capable Vulkan device"); return; }
 
     const uint32_t W=64,H=64,PITCH=W*4 + 16;   // 16 bytes row padding
@@ -17,13 +17,11 @@ TEST_CASE("vulkan driven: uploaded framebuffer (padded pitch) shows + overlay bl
     std::vector<uint8_t> out((size_t)W*H*4, 0);
     REQUIRE(b.composite_driven(src.data(), W, H, PITCH, /*dupe=*/false, out.data(), err) == RP_OK);
     auto at=[&](std::vector<uint8_t>& buf, uint32_t x,uint32_t y,int c){ return buf[((size_t)y*W+x)*4+c]; };
-    CHECK(at(out,60,60,1) > 200); CHECK(at(out,60,60,2) < 60);      // green outside overlay
-    CHECK(at(out,4,4,2) > 80);    CHECK(at(out,4,4,1) < at(out,60,60,1)); // blended inside overlay
+    CHECK(at(out,60,60,1) > 200); CHECK(at(out,60,60,2) < 60);      // uploaded green composites
 
     // dupe==true must reuse the last uploaded image (no new data supplied) and still
-    // composite correctly: green outside the overlay, blend inside it.
+    // composite the green frame correctly.
     std::vector<uint8_t> out2((size_t)W*H*4, 0);
     REQUIRE(b.composite_driven(nullptr, W, H, 0, /*dupe=*/true, out2.data(), err) == RP_OK);
     CHECK(at(out2,60,60,1) > 200); CHECK(at(out2,60,60,2) < 60);
-    CHECK(at(out2,4,4,2) > 80);    CHECK(at(out2,4,4,1) < at(out2,60,60,1));
 }

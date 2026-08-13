@@ -20,7 +20,7 @@ using namespace rp;
 // refcore_present_vk — rp_runtime_load_core(cores/dolphin_present) + rp_runtime_load_content(any GC ISO)
 // — and drives it through rp_runtime_present. Dolphin (built from source, no libretro) renders the real
 // Billy Hatcher ROM into RetroPark's exported shared VkImage (copy-from-XFB), and the Runtime composites
-// our overlay on top — all through rp_core_abi, no test-only C API and no manual consume loop. This is
+// it into our surface — all through rp_core_abi, no test-only C API and no manual consume loop. This is
 // the whole reusable-core payoff of the Dolphin arc, proven end to end through the public API.
 
 #ifndef RP_DOLPHIN_CORE_DIR
@@ -47,7 +47,7 @@ bool looks_rendered(const std::vector<uint8_t>& img) {
 }
 } // namespace
 
-TEST_CASE("dolphin core: Runtime loads dolphin_present + a GC ISO and presents it with an overlay (gated)") {
+TEST_CASE("dolphin core: Runtime loads dolphin_present + a GC ISO and composites it into our surface (gated)") {
     // Opt-in only (heavy: builds a real GC frame pipeline). Set RP_RUN_DOLPHIN=1 to run.
     if (!std::getenv("RP_RUN_DOLPHIN")) { WARN("RP_RUN_DOLPHIN not set; skipping Dolphin core e2e"); return; }
     if (!VulkanBackend::probe_vulkan_shared()) { WARN("no capable Vulkan device; skipping"); return; }
@@ -74,7 +74,7 @@ TEST_CASE("dolphin core: Runtime loads dolphin_present + a GC ISO and presents i
 
     // Dolphin boots over a few seconds; present() returns non-OK until the first XFB frame lands in the
     // ring. Poll for the first good frame, then keep pumping to capture an early and a late frame.
-    // The video/overlay proof is captured by frame 240 (the settled early-boot frame). Dolphin's boot
+    // The video proof is captured by frame 240 (the settled early-boot frame). Dolphin's boot
     // logos are SILENT for the first ~13 game-seconds, though, and the lock-step present throttles
     // emulation to the host's consume rate (~1 game-frame per present), so audio does not begin until
     // several hundred more frames in. After the video proof is captured we therefore keep pumping
@@ -92,7 +92,7 @@ TEST_CASE("dolphin core: Runtime loads dolphin_present + a GC ISO and presents i
         if (good <= 240) late = img;               // freeze the late frame at the settled boot screen
         if (good % 60 == 0) { fprintf(stderr, "[dolphin-core] %d frames presented\n", good); fflush(stderr); }
         if (good >= 240) {
-            // Video/overlay proof captured; keep advancing until the game's boot reaches audio.
+            // Video proof captured; keep advancing until the game's boot reaches audio.
             uint64_t af = 0; int ans = 0;
             rp_runtime_audio_stats(rt, &af, &ans);
             if (ans || good >= 1500) break;
@@ -100,7 +100,7 @@ TEST_CASE("dolphin core: Runtime loads dolphin_present + a GC ISO and presents i
     }
     fprintf(stderr, "[dolphin-core] presented %d good frames total\n", good); fflush(stderr);
 
-    // Save the composited frame for human confirmation (the game inside our surface, overlay on top).
+    // Save the composited frame for human confirmation (the game inside our surface).
     if (!late.empty()) {
         FILE* fp = fopen("dolphin_core_composited.rgba", "wb");
         if (fp) { fwrite(late.data(), 1, late.size(), fp); fclose(fp); }
@@ -127,25 +127,6 @@ TEST_CASE("dolphin core: Runtime loads dolphin_present + a GC ISO and presents i
         for (size_t i = 0; i < late.size(); ++i) if (late[i] != early[i]) ++diff;
         CHECK(diff > late.size() / 20);             // frames differ -> real emulation advancing
     }
-    // Overlay blend: the compositor draws a blue (0,0,1) @0.5-alpha quad over the top-left quadrant with
-    // src_alpha/one_minus_src_alpha, so there out = 0.5*content + 0.5*(0,0,255): green is halved and blue
-    // gets +127. Absolute blue barely moves on a near-white boot screen (already saturated), so assert
-    // the brightness-robust signal the tint actually produces — blue-minus-green is far higher in the
-    // overlaid top-left than in the untinted bottom-right (real alpha blending, not opaque layering).
-    auto tint = [&](uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1) {
-        double sb = 0, sg = 0; uint32_t n = 0;
-        for (uint32_t y = y0; y < y1; ++y)
-            for (uint32_t x = x0; x < x1; ++x) {
-                sg += late[(y * W + x) * 4 + 1];
-                sb += late[(y * W + x) * 4 + 2];
-                ++n;
-            }
-        return n ? (sb - sg) / n : 0.0;  // blue-minus-green
-    };
-    double tint_tl = tint(0, 0, W / 2, H / 2), tint_br = tint(W / 2, H / 2, W, H);
-    fprintf(stderr, "[dolphin-core] overlay tint (B-G): top-left=%.1f bottom-right=%.1f\n", tint_tl, tint_br);
-    fflush(stderr);
-    CHECK(tint_tl > tint_br + 30.0);
 
     // Dolphin's game audio reached RetroPark's output path, and it is real sound (not silence).
     CHECK(audio_frames > 0);
