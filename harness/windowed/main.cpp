@@ -100,6 +100,15 @@ static rp_input_state read_local_input() {
             xi_connected = false;
         }
     }
+    // Keyboard fallback for the abstract d-pad / left stick (arrow keys) so a presenting core
+    // like Dolphin is playable without an XInput pad. Face buttons + Start already arrive via
+    // s.keys[] (the Dolphin vehicle maps Enter=Start, K=A, J=B, L=X, I=Y, U=Z). Applied after
+    // the gamepad merge so a held arrow overrides a centred stick, not the reverse.
+    auto down = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
+    if (down(VK_UP))    { s.pad_buttons |= (uint16_t)(1u << RP_PAD_DPAD_UP);    s.pad_axes[RP_AXIS_LEFT_Y] = -32767; }
+    if (down(VK_DOWN))  { s.pad_buttons |= (uint16_t)(1u << RP_PAD_DPAD_DOWN);  s.pad_axes[RP_AXIS_LEFT_Y] =  32767; }
+    if (down(VK_LEFT))  { s.pad_buttons |= (uint16_t)(1u << RP_PAD_DPAD_LEFT);  s.pad_axes[RP_AXIS_LEFT_X] = -32767; }
+    if (down(VK_RIGHT)) { s.pad_buttons |= (uint16_t)(1u << RP_PAD_DPAD_RIGHT); s.pad_axes[RP_AXIS_LEFT_X] =  32767; }
     return s;
 }
 
@@ -196,7 +205,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     np_status_fn dp_np_status = nullptr;
     bool dolphin_netplay_host = false;     // this machine hosts Dolphin netplay and still owes a start()
 
-    g_rt = rp_runtime_create(api, hwnd);
+    // Presenting cores via --core (e.g. dolphin_present) are displayed through the HEADLESS
+    // readback path: create the runtime headless and GDI-blit each frame's readback into the
+    // window (see the present loop below). This is the same route EverythingBox uses to show a
+    // presenting core, so it is the proven-good display path. Driven / refcore cores keep the
+    // swapchain present path (pass the real window).
+    const bool blit_mode = !custom_core_dir.empty();
+    g_rt = rp_runtime_create(api, blit_mode ? nullptr : hwnd);
     if (!custom_core_dir.empty()) {
         // Arbitrary Vulkan presenting core (e.g. dolphin_present). --content feeds it the ROM; F5/F7 then
         // save/load it via the already-generic key handler.
@@ -275,7 +290,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     const uint32_t out_w = use_content ? 256 : 640;
     const uint32_t out_h = use_content ? 240 : 480;
     std::vector<uint8_t> rb_out(static_cast<size_t>(out_w) * out_h * 4);
-    if (use_content) {
+    // content_hash is only consumed by the netplay handshake below; skip the (potentially large,
+    // e.g. ~800 MB GC ISO) ROM read + crc32 entirely for normal single-player play, where it would
+    // just stall boot.
+    if (use_content && (netplay_host_flag || netplay_join_flag)) {
         std::ifstream rom_f(content_path, std::ios::binary);
         if (rom_f) {
             std::vector<uint8_t> rom_bytes((std::istreambuf_iterator<char>(rom_f)), std::istreambuf_iterator<char>());
@@ -330,6 +348,44 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         netplay = true;
         fflush(stdout);
     }
+
+    // Headless-readback display for presenting cores: a 640x480 RGBA readback buffer, a GDI
+    // blit into the window, and a ~60 fps pacer. The presenting core's lock-step throttles the
+    // emulation to our consume rate, so if we consumed as fast as the loop spins the game would
+    // run at the wrong speed -- pace the consume to GC's ~59.94 Hz.
+    const uint32_t blit_w = 640, blit_h = 480;
+    std::vector<uint8_t> blit_buf;
+    if (blit_mode) blit_buf.assign(static_cast<size_t>(blit_w) * blit_h * 4, 0);
+    LARGE_INTEGER qpf{}; QueryPerformanceFrequency(&qpf);
+    LARGE_INTEGER frame_deadline{}; QueryPerformanceCounter(&frame_deadline);
+    const double kFrameTicks = static_cast<double>(qpf.QuadPart) / 59.94;
+    auto present_frame = [&]() {
+        if (!blit_mode) { rp_runtime_present(g_rt, nullptr); return; }   // driven/refcore: swapchain present
+        if (rp_runtime_present(g_rt, blit_buf.data()) != RP_OK) return;  // presenting: headless readback
+        // Readback is RGBA8; a 32bpp BI_RGB DIB is BGRA, so swap R<->B in place before the blit.
+        for (size_t p = 0; p + 2 < blit_buf.size(); p += 4) {
+            uint8_t t = blit_buf[p]; blit_buf[p] = blit_buf[p + 2]; blit_buf[p + 2] = t;
+        }
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = static_cast<LONG>(blit_w);
+        bmi.bmiHeader.biHeight = -static_cast<LONG>(blit_h);   // negative => top-down (row 0 = top)
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        RECT rc{}; GetClientRect(hwnd, &rc);
+        HDC hdc = GetDC(hwnd);
+        StretchDIBits(hdc, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
+                      0, 0, static_cast<int>(blit_w), static_cast<int>(blit_h),
+                      blit_buf.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
+        ReleaseDC(hwnd, hdc);
+        // Pace to ~60 fps so the lock-step emulation advances at the correct rate.
+        frame_deadline.QuadPart += static_cast<LONGLONG>(kFrameTicks);
+        LARGE_INTEGER now{}; QueryPerformanceCounter(&now);
+        double wait_ms = static_cast<double>(frame_deadline.QuadPart - now.QuadPart) * 1000.0 / static_cast<double>(qpf.QuadPart);
+        if (wait_ms > 34.0) { frame_deadline = now; }          // fell far behind -> resync deadline
+        else if (wait_ms > 1.0) { Sleep(static_cast<DWORD>(wait_ms)); }
+    };
 
     MSG msg{};
     bool running = true;
@@ -399,10 +455,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
                 // (skip the present this tick) rather than lurching forward again while the key
                 // is still held.
                 if (rp_runtime_rewind(g_rt) == RP_OK) {
-                    rp_runtime_present(g_rt, nullptr);
+                    present_frame();
                 }
             } else {
-                rp_runtime_present(g_rt, nullptr);   // normal forward present to the window
+                present_frame();   // headless-readback blit (presenting) or swapchain present (driven)
             }
         }
     }
