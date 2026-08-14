@@ -3,8 +3,10 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:subagent-driven-development or executing-plans
 > to implement task-by-task. Steps use `- [ ]` checkboxes.
 
-**Goal:** Package the Slice-I RPCS3 embed as a loadable `rpcs3_present` RetroPark core (ABI v5) that renders
-into the Runtime's host-owned shared `VkImage` exactly like `dolphin_present`.
+**Goal:** Package the Slice-I RPCS3 embed as a loadable `rpcs3_present` RetroPark core (ABI **v7** — was v5 at
+authoring; see the SUPERSEDING UPDATE below) that renders into the Runtime's host-owned shared `VkImage`
+exactly like `dolphin_present` — which now means multi-slot direct present + consume-timeline back-pressure +
+an adaptive `audio_want` feeder, not the single-slot lock-step this plan originally specced.
 
 > **STATUS 2026-08-11: FUNCTIONALLY COMPLETE.** The cross-process zero-copy frame handoff works end-to-end under
 > the real Runtime: the producer imports the host's shared VkImage + timeline into RPCS3's VkDevice, per-frame
@@ -21,12 +23,92 @@ into the Runtime's host-owned shared `VkImage` exactly like `dolphin_present`.
 host GPU) and per-frame blits RPCS3's present-source image into the shared image with QFOT + even/odd timeline
 lock-step. **Frame-transfer path chosen: A — zero-copy GPU blit.**
 
+---
+
+> # ⚠️ SUPERSEDING UPDATE — Dolphin-parity lessons (2026-08-14)
+>
+> Everything below was designed 2026-08-11 against the **single-slot lock-step + no-audio** patterns that
+> `dolphin_present` also used at the time. On 2026-08-14 those patterns were **replaced** in `dolphin_present`
+> after they proved to cap speed at ~87%, tear without real back-pressure, and (once audio landed) crackle.
+> RPCS3 is a sibling of *pre-fix* Dolphin, so it needs the same three upgrades **plus a mandatory ABI rebuild**.
+> Read this section as the authority; where it conflicts with Tasks 3–4 / Global Constraints below, THIS wins.
+> The proven reference is now the FIXED `dolphin_present` (RetroPark commits `6224a55` speed+back-pressure,
+> `816899f` audio) — see [[retropark-project]] "Dolphin speed + correctness follow-up" / "audio adaptive feeder".
+>
+> ## 0. ABI v5 → v7 — REBUILD IS MANDATORY (do this first)
+> The header is now `RETROPARK_ABI_VERSION 7u`. The built `rpcs3_present.dll` reports **v5**, and the Runtime's
+> loader gates on **strict equality** (`CoreLoader`: `abi_version != RETROPARK_ABI_VERSION → RP_ERR_ABI_MISMATCH`),
+> so the current DLL **will no longer load** — the RPCS3 dev loop is blocked until rebuilt. Both source files
+> already init `abi_version` from the macro, so a plain rebuild makes it v7. **But rebuilding only fixes
+> *loadability*** — the v6/v7 *features* (multi-slot back-pressure, `audio_want`) are the upgrades in §1–§2 and
+> must be *implemented*, not just recompiled. `cores/rpcs3_present/core.json` is already bumped to 7 (cosmetic —
+> the loader reads the compiled struct, not the JSON).
+>
+> ## 1. Present — SUPERSEDES Task 3: multi-slot direct present + a consume timeline
+> **Old (Task 3 below):** import ONE shared image (`surfaces[0]`), blit into it, single produce timeline —
+> producer signals `2f`, waits `2(f-1)+1`; the reuse wait is satisfied by the producer's OWN signal. That is
+> exactly what capped Dolphin at ~87% and let it lap the host into a tear.
+> **New (match fixed `dolphin_present`):**
+> - **N images, round-robin.** The host's `SurfaceRing` is `slot_count = 3`. `set_surfaces` must import **all
+>   `set->count` images** (`surfaces[0..count-1].shared_handle`), not just `surfaces[0]`. On present frame `f`,
+>   blit into `image[f % slot_count]` and call `submit_frame(host, f % slot_count, generation, 2f+2)`. This lets
+>   RPCS3 render frame N+1 while the host still composites N (the overlap that unlocks full speed).
+> - **A second, host-owned CONSUME timeline (the real back-pressure).** A single produce timeline *cannot*
+>   express "the host finished reading slot X" once the producer also advances it. Read the new field
+>   `rp_surface_set.consume_sync_handle` (added in ABI v6) and import it as a second timeline. Before REUSING a
+>   slot (i.e. before blitting frame `f` into `image[f % slot_count]`), **wait the consume timeline for
+>   `2*(f - slot_count) + 3`** — the value the host signals after its composite's GPU read of that slot
+>   completes. RPCS3 never signals the consume timeline, so it cannot self-satisfy the wait → genuine
+>   back-pressure, no tear. **Gate the whole two-timeline path on `slot_count >= 2`**; `slot_count == 1` keeps
+>   the old single-produce-timeline lock-step (a valid single-image fallback).
+> - **Timeline convention:** produce signal `2f+2`, consume wait `2*(f-slot_count)+3` (match `dolphin_present`
+>   exactly; drop the old `2f` / `2(f-1)+1` even/odd single-timeline scheme). The producer no longer waits its
+>   OWN produce timeline for pacing — the consume timeline is the only back-pressure.
+> - **Cross-process wrinkle (RPCS3-specific, RPCS3 is out-of-process, Dolphin is in-process):** the handoff must
+>   `DuplicateHandle` **all N image handles + the consume-timeline handle** into the child (extend the
+>   `--rp-image`/`--rp-timeline` cmdline passing to a list + the new consume handle). The `submit_frame` pipe
+>   relay already carries a slot `index` in `rp_submit_msg` — populate it with `f % slot_count` (it is currently
+>   hard-wired to 0). Model the producer on the FIXED `dolphin_present` (`VKSwapChain` multi-slot +
+>   `VKGfx::PresentBackbuffer` external branch), NOT `RefCoreVk.cpp` (which is still single-slot).
+>
+> ## 2. Audio — SUPERSEDES Task 4: build the adaptive `audio_want` feeder from the start
+> Do **not** ship a free-running fixed-sleep puller (pull 480 / `sleep(10ms)` / push) — that is precisely the
+> Dolphin design that crackled (its supply rate was set by the OS timer, not the 48 kHz playback clock, so the
+> host output queue periodically starved). Build it adaptive from day one:
+> - The host exposes `rp_host_iface.audio_want(host) → frames the output can accept now` (ABI v7). Pull exactly
+>   that many from RPCS3's mixer (null audio backend, like Dolphin's Null + `Mixer::Mix`), and submit it as
+>   several **~512-frame chunks** (multiple small buffers stay in flight → overlap; one big buffer leaves the
+>   queue one-deep and pops every drain — a bug the Dolphin test caught).
+> - **Cross-process wrinkle:** `audio_want`/`audio_sample` live in the DLL's process (it holds `rp_host`), but
+>   the mixer is in the child. Cleanest flow: the DLL each tick calls `rp_host.audio_want`, sends that frame
+>   count to the child over the pipe; the child pulls exactly that from RPCS3's mixer and relays the s16 stereo
+>   frames back; the DLL calls `rp_host.audio_sample`. So the pipe carries a want request (DLL→child) + audio
+>   frames (child→DLL) alongside the existing `submit_frame` messages.
+>
+> ## 3. Data dir — NO change needed (unlike Dolphin)
+> RPCS3 already resolves firmware/config from the **`RPCS3_CONFIG_DIR` env var** the host sets — it does *not*
+> need Dolphin's `EnsureDolphinSysDir` self-location. The only follow-up is at EB-integration time: EB must set
+> `RPCS3_CONFIG_DIR` and provide **PS3 firmware (`dev_flash`)**, which — unlike Dolphin's shippable `Sys` — is
+> licensing-sensitive and USER-PROVIDED (point at the user's install; never bundle it).
+>
+> ## 4. Sequencing — these are NOT RPCS3's first blocker
+> RPCS3 still does not render real content (frames are black — LBP boot-loading — and there is a known
+> **BGRA→RGBA swizzle** bug, colors swapped). Fix *rendering real content* and the swizzle FIRST; the §1–§2
+> parity work is speed/correctness that only matters once a real frame is on screen. Order: **(a) rebuild at v7
+> [§0, mandatory to load] → (b) real content + swizzle → (c) multi-slot present [§1] → (d) consume-timeline
+> back-pressure [§1] → (e) adaptive audio [§2].** (a) is cheap and unblocks the dev loop; (c)–(e) are the actual
+> Dolphin-parity slice.
+
+---
+
 **Tech Stack:** RPCS3-from-source (`rpcs3_lib` closure, Qt 6.10.3 at `D:\Qt\6.10.3\msvc2022_64`), RetroPark
 `include/retropark/retropark_abi.h`, Vulkan external memory/semaphore (OPAQUE_WIN32), CMake/VS build.
 
 ## Global Constraints
 
-- ABI **v5**, no bump. Export symbol `rp_get_core_abi`; `abi_version == RETROPARK_ABI_VERSION (5)`.
+- ABI **v7** (was v5 when this plan was written; the header is now `RETROPARK_ABI_VERSION 7u`). Export symbol
+  `rp_get_core_abi`; `abi_version == RETROPARK_ABI_VERSION (7)`. **The v5 DLL no longer loads — rebuild first
+  (see the SUPERSEDING UPDATE §0).**
 - `external/rpcs3` is git-ignored — the `.patch`/notes + committed `core.json`/docs are the record.
 - Reuse the Slice-I `main_application` subclass + the four `run_rpcs3`-bypass fixes (EBOOT-file path, file
   logger, `SetProcessWorkingSetSize`, avoid early CPU readback). Boot the **EBOOT.BIN file**, not the folder.
@@ -93,6 +175,12 @@ lock-step. **Frame-transfer path chosen: A — zero-copy GPU blit.**
 
 ### Task 3: Zero-copy frame transfer (Path A) — the producer
 
+> ⚠️ **Approach SUPERSEDED — see SUPERSEDING UPDATE §1.** The single-image / single-slot lock-step described
+> here (import `surfaces[0]`, signal `2f`, wait `2(f-1)+1`) is the pre-fix pattern. Build multi-slot direct
+> present (import all N images, round-robin `image[f%slot_count]`, produce-signal `2f+2`) **plus** the
+> host-owned consume timeline (`rp_surface_set.consume_sync_handle`, wait `2*(f-slot_count)+3` before slot
+> reuse, gated `slot_count>=2`). The rest of this task's import/QFOT/cmd-buffer mechanics still apply per slot.
+
 **Files:** Modify `rp_rpcs3_present.cpp` (add the `Rpcs3XfbProducer` glue on the present seam).
 
 **Interfaces:**
@@ -121,6 +209,11 @@ lock-step. **Frame-transfer path chosen: A — zero-copy GPU blit.**
 - [ ] **Step 5: Commit** (`feat: rpcs3_present zero-copy frame handoff into the shared VkImage`).
 
 ### Task 4: Audio egress
+
+> ⚠️ **Approach SUPERSEDED — see SUPERSEDING UPDATE §2.** Do NOT forward a fixed chunk on a free-running timer
+> (that is the design that crackled in Dolphin). Pull by `rp_host_iface.audio_want(host)` and submit in
+> ~512-frame chunks; across the process boundary, the DLL relays the want count to the child and the child
+> relays the pulled s16 frames back over the pipe.
 
 **Files:** Modify `rp_rpcs3_present.cpp`.
 
