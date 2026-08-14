@@ -43,6 +43,13 @@ rp_result rp_runtime_render(rp_runtime* rt, uint8_t* out_rgba);
    received from the core since load; nonsilent_out = 1 if any non-near-zero sample was seen. */
 void rp_runtime_audio_stats(rp_runtime* rt, uint64_t* frames_out, int* nonsilent_out);
 
+/* Audio-queue health for presenting cores that pull via rp_host_iface.audio_want (test/telemetry):
+   want_calls = times the core polled audio_want; min_queued = shallowest output backlog (frames) seen
+   after playback began (0xFFFFFFFF if never polled with a device); starvations = polls that found the
+   queue empty (a real underrun -- a healthy adaptive feeder keeps this at 0). Any out-ptr may be NULL. */
+void rp_runtime_audio_queue_stats(rp_runtime* rt, uint64_t* want_calls_out,
+                                  uint32_t* min_queued_out, uint32_t* starvations_out);
+
 /* Size in bytes of the loaded core's savestate, or 0 if no core is loaded / the core does not
    support serialization. */
 size_t rp_runtime_serialize_size(rp_runtime* rt);

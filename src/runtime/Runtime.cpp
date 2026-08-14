@@ -25,6 +25,9 @@ static void host_video_refresh(rp_host* h, const void* d, uint32_t w, uint32_t h
 static void host_audio_sample(rp_host* h, const int16_t* f, size_t n) {
     reinterpret_cast<Runtime*>(h)->on_audio_sample(f, n);
 }
+static size_t host_audio_want(rp_host* h) {
+    return reinterpret_cast<Runtime*>(h)->on_audio_want();
+}
 
 Runtime::Runtime(rp_graphics_api api, void* native_window) : native_window_(native_window), api_(api) {
     backend_ = make_backend(api_);
@@ -40,6 +43,7 @@ Runtime::Runtime(rp_graphics_api api, void* native_window) : native_window_(nati
     host_iface_.input_state = host_input;
     host_iface_.video_refresh = host_video_refresh;
     host_iface_.audio_sample = host_audio_sample;
+    host_iface_.audio_want = host_audio_want;
 }
 
 Runtime::~Runtime() { unload_core(); }
@@ -73,6 +77,15 @@ void Runtime::on_audio_sample(const int16_t* frames, size_t n) {
         for (size_t i = 0; i < n * 2; ++i) { int16_t s = frames[i]; if (s > 128 || s < -128) { audio_nonsilent_ = true; break; } }
     }
     if (audio_) audio_->submit(frames, n);
+}
+size_t Runtime::on_audio_want() {
+    audio_want_calls_.fetch_add(1, std::memory_order_relaxed);
+    // With a live output, steer the producer to the device's real consumption (target backlog minus
+    // what is still queued). With no output device (audio_ null) fall back to a fixed nominal chunk so
+    // the producer keeps pulling+counting exactly as the pre-feeder code did -- no behavioural regression
+    // on a device-less path. Paused: pull nothing (the compositor is frozen and audio is muted).
+    if (paused_) return 0;
+    return audio_ ? audio_->want_frames() : 480;
 }
 void Runtime::open_audio(const rp_av_info& av) {
     audio_frames_ = 0;
@@ -478,6 +491,13 @@ void rp_runtime_audio_stats(rp_runtime* rt, uint64_t* frames_out, int* nonsilent
     auto* r = reinterpret_cast<Runtime*>(rt);
     if (frames_out) *frames_out = r->audio_frames();
     if (nonsilent_out) *nonsilent_out = r->audio_nonsilent() ? 1 : 0;
+}
+void rp_runtime_audio_queue_stats(rp_runtime* rt, uint64_t* want_calls_out,
+                                  uint32_t* min_queued_out, uint32_t* starvations_out) {
+    auto* r = reinterpret_cast<Runtime*>(rt);
+    if (want_calls_out)  *want_calls_out  = r->audio_want_calls();
+    if (min_queued_out)  *min_queued_out  = r->audio_min_queued();
+    if (starvations_out) *starvations_out = r->audio_starvations();
 }
 size_t rp_runtime_serialize_size(rp_runtime* rt) {
     if (!rt) return 0;

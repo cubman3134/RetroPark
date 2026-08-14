@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define RETROPARK_ABI_VERSION 6u  /* was 5 -- rp_surface_set gains consume_sync_handle (Vulkan back-pressure) */
+#define RETROPARK_ABI_VERSION 7u  /* was 6 -- rp_host_iface gains audio_want (presenting-core audio flow control) */
 #define RP_CORE_ABI_EXPORT_NAME "rp_get_core_abi"
 
 typedef enum rp_result {
@@ -111,6 +111,12 @@ typedef struct rp_host_iface {
     void (*input_state)(rp_host* host, uint32_t port, rp_input_state* out);
     void (*video_refresh)(rp_host* host, const void* data, uint32_t width, uint32_t height, uint32_t pitch);
     void (*audio_sample)(rp_host* host, const int16_t* frames, size_t num_frames);
+    /* Audio flow control for PRESENTING cores (Dolphin/RPCS3) that pull their own mixer off a thread:
+       returns how many stereo frames the host can accept right now to reach its target output-queue
+       depth (0 = the queue is full, pull nothing). Pull exactly this many, forward via audio_sample,
+       and the average pull rate self-locks to the host's true playback clock -- no free-running timer,
+       no under/overrun crackle. Driven cores (host owns the frame clock) do not use this. */
+    size_t (*audio_want)(rp_host* host);
 } rp_host_iface;
 
 typedef struct rp_core_info {

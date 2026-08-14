@@ -45,10 +45,14 @@ public:
     void on_input(uint32_t port, rp_input_state* out);
     void on_video_refresh(const void* data, uint32_t w, uint32_t h, uint32_t pitch);
     void on_audio_sample(const int16_t* frames, size_t num_frames);
+    size_t on_audio_want();   // presenting-core audio flow control (see rp_host_iface.audio_want)
 
     uint64_t audio_frames() const { return audio_frames_; }
     bool audio_nonsilent() const { return audio_nonsilent_; }
     uint64_t input_polls() const { return input_polls_.load(std::memory_order_relaxed); }
+    uint64_t audio_want_calls() const { return audio_want_calls_.load(std::memory_order_relaxed); }
+    uint32_t audio_min_queued() const { return audio_ ? audio_->min_queued_frames() : 0xFFFFFFFFu; }
+    uint32_t audio_starvations() const { return audio_ ? audio_->starvation_events() : 0; }
 
 private:
     rp_result rebuild_surfaces(std::string& err);
@@ -80,6 +84,7 @@ private:
     std::atomic<uint64_t> audio_frames_{0};
     std::atomic<bool>     audio_nonsilent_{false};
     std::atomic<uint64_t> input_polls_{0};
+    std::atomic<uint64_t> audio_want_calls_{0};   // times a core polled audio_want (plumbing proof)
 
     // Rewind ring: bounded uncompressed per-frame snapshots of the driven core's pre-frame
     // state, captured at the top of each forward present(). See RewindRing.h / spec §2.
