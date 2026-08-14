@@ -1,5 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <timeapi.h>   // timeBeginPeriod (excluded by WIN32_LEAN_AND_MEAN)
 #include <shellapi.h>
 #include <retropark/retropark.h>
 #include "net/NetSession.h"
@@ -16,6 +17,8 @@
 #include <memory>
 #include <string>
 #include <vector>
+
+#pragma comment(lib, "winmm.lib")   // timeBeginPeriod, for the presenting-core frame pacer
 
 static rp_runtime* g_rt = nullptr;
 
@@ -205,7 +208,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     np_status_fn dp_np_status = nullptr;
     bool dolphin_netplay_host = false;     // this machine hosts Dolphin netplay and still owes a start()
 
-    g_rt = rp_runtime_create(api, hwnd);
+    // Presenting cores (--core, e.g. dolphin_present) render through the HEADLESS readback path and
+    // are blitted into the window in the loop below -- the same full-speed route EverythingBox uses.
+    // The windowed swapchain also renders them, but its vsync serialises with the core's lock-step
+    // and runs the emulation in slow-motion (~85%). Driven / refcore cores keep the swapchain.
+    const bool blit_mode = !custom_core_dir.empty();
+    g_rt = rp_runtime_create(api, blit_mode ? nullptr : hwnd);
     if (!custom_core_dir.empty()) {
         // Arbitrary Vulkan presenting core (e.g. dolphin_present). --content feeds it the ROM; F5/F7 then
         // save/load it via the already-generic key handler.
@@ -343,6 +351,40 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         fflush(stdout);
     }
 
+    // Presenting-core display: headless readback -> GDI blit, paced to GC's ~59.94 Hz (the core's
+    // lock-step throttles emulation to our consume rate, so precise pacing == correct game speed).
+    // timeBeginPeriod(1) makes Sleep fine-grained (default ~15.6 ms would jitter and crackle audio);
+    // HALFTONE gives a smooth scaled blit instead of the tiling plain nearest-neighbour produced.
+    if (blit_mode) timeBeginPeriod(1);
+    const uint32_t blit_w = 640, blit_h = 480;
+    std::vector<uint8_t> blit_buf;
+    if (blit_mode) blit_buf.assign(static_cast<size_t>(blit_w) * blit_h * 4, 0);
+    LARGE_INTEGER qpf{}; QueryPerformanceFrequency(&qpf);
+    LARGE_INTEGER frame_deadline{}; QueryPerformanceCounter(&frame_deadline);
+    const double kFrameTicks = static_cast<double>(qpf.QuadPart) / 59.94;
+    auto present_frame = [&]() {
+        if (!blit_mode) { rp_runtime_present(g_rt, nullptr); return; }   // driven/refcore: swapchain
+        if (rp_runtime_present(g_rt, blit_buf.data()) != RP_OK) return;  // presenting: headless readback
+        for (size_t p = 0; p + 2 < blit_buf.size(); p += 4) { uint8_t t = blit_buf[p]; blit_buf[p] = blit_buf[p + 2]; blit_buf[p + 2] = t; }
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = static_cast<LONG>(blit_w);
+        bmi.bmiHeader.biHeight = -static_cast<LONG>(blit_h);   // top-down
+        bmi.bmiHeader.biPlanes = 1; bmi.bmiHeader.biBitCount = 32; bmi.bmiHeader.biCompression = BI_RGB;
+        RECT rc{}; GetClientRect(hwnd, &rc);
+        HDC hdc = GetDC(hwnd);
+        SetStretchBltMode(hdc, HALFTONE); SetBrushOrgEx(hdc, 0, 0, nullptr);   // smooth scale (no tiling)
+        StretchDIBits(hdc, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
+                      0, 0, static_cast<int>(blit_w), static_cast<int>(blit_h),
+                      blit_buf.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
+        ReleaseDC(hwnd, hdc);
+        frame_deadline.QuadPart += static_cast<LONGLONG>(kFrameTicks);
+        LARGE_INTEGER now{}; QueryPerformanceCounter(&now);
+        double wait_ms = static_cast<double>(frame_deadline.QuadPart - now.QuadPart) * 1000.0 / static_cast<double>(qpf.QuadPart);
+        if (wait_ms > 34.0) { frame_deadline = now; }          // fell far behind -> resync
+        else if (wait_ms > 1.0) { Sleep(static_cast<DWORD>(wait_ms)); }
+    };
+
     MSG msg{};
     bool running = true;
     while (running) {
@@ -411,10 +453,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
                 // (skip the present this tick) rather than lurching forward again while the key
                 // is still held.
                 if (rp_runtime_rewind(g_rt) == RP_OK) {
-                    rp_runtime_present(g_rt, nullptr);
+                    present_frame();
                 }
             } else {
-                rp_runtime_present(g_rt, nullptr);   // normal forward present to the window
+                present_frame();
             }
         }
     }
