@@ -2,7 +2,7 @@
   "id": "rpcs3_present",
   "name": "RPCS3 (PlayStation 3) Presenting Core",
   "type": "presenting",
-  "abi_version": 5,
+  "abi_version": 6,
   "graphics_api": "vulkan",
   "entry": "rpcs3_present.dll",
   "requires_content": true

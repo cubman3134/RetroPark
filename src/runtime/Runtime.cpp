@@ -100,6 +100,7 @@ rp_result Runtime::rebuild_surfaces(std::string& err) {
         set.count = (uint32_t)descs.size();
         set.surfaces = descs.data();
         set.sync_handle = backend_->present_sync_handle();
+        set.consume_sync_handle = backend_->present_consume_sync_handle();
         backend_->present_device_uuid(set.device_uuid);
         return loader_.set_surfaces(&set, err);
     }

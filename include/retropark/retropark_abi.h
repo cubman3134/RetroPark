@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define RETROPARK_ABI_VERSION 5u  /* was 4 -- input_state gains a port (Slice G netplay) */
+#define RETROPARK_ABI_VERSION 6u  /* was 5 -- rp_surface_set gains consume_sync_handle (Vulkan back-pressure) */
 #define RP_CORE_ABI_EXPORT_NAME "rp_get_core_abi"
 
 typedef enum rp_result {
@@ -53,8 +53,18 @@ typedef struct rp_surface_set {
     uint32_t               count;
     uint32_t               reserved;
     const rp_surface_desc* surfaces;
-    void*                  sync_handle;      /* shared timeline semaphore NT handle (Vulkan); NULL for D3D11 */
+    void*                  sync_handle;      /* PRODUCE timeline semaphore NT handle (Vulkan): core signals 2f+2 per
+                                                frame, host waits it before compositing; NULL for D3D11 */
     uint8_t                device_uuid[16];  /* target VkPhysicalDevice UUID (Vulkan); all-zero for D3D11 */
+    void*                  consume_sync_handle; /* CONSUME timeline semaphore NT handle (Vulkan): the HOST owns +
+                                                signals it (2f+3) after its GPU finishes reading frame f, and the
+                                                core ONLY waits on it before REUSING a slot. This is the genuine
+                                                GPU-read-before-write back-pressure for N>=2 shared images: unlike a
+                                                single shared timeline (which the core's own produce signals also
+                                                advance, so the reuse wait is satisfied by the core itself), a
+                                                one-directional channel the core never signals cannot be self-
+                                                satisfied. 0/NULL => old single-timeline lock-step (slot_count==1
+                                                boot path + non-Vulkan cores are unaffected). */
 } rp_surface_set;
 
 typedef struct rp_input_state {

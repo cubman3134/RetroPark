@@ -19,6 +19,9 @@ struct IRenderBackend {
 
     // External-sync accessors (Vulkan; default no-op for backends without external sync).
     virtual void* present_sync_handle() const { return nullptr; }
+    // CONSUME timeline handle: the host-owned one-directional back-pressure channel the presenting core
+    // waits on before reusing a shared slot (Vulkan multi-slot). null => single-timeline lock-step.
+    virtual void* present_consume_sync_handle() const { return nullptr; }
     virtual void  present_device_uuid(uint8_t out[16]) const { for (int i=0;i<16;++i) out[i]=0; }
 };
 }

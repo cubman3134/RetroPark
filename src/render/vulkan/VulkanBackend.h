@@ -16,6 +16,7 @@ public:
     rp_result composite_driven(const void*, uint32_t, uint32_t, uint32_t, bool, uint8_t*, std::string& err) override;
     void  present_device_uuid(uint8_t out[16]) const override { std::memcpy(out, device_uuid_, 16); }
     void* present_sync_handle() const override { return sync_handle_; }
+    void* present_consume_sync_handle() const override { return consume_sync_handle_; }
 
     static bool probe_vulkan_shared();
 
@@ -60,8 +61,14 @@ protected:
     VkQueue queue_ = VK_NULL_HANDLE;
     uint8_t device_uuid_[16] = {0};
     std::vector<VkSurface> surfaces_;        // exported shared image ring
-    VkSemaphore timeline_ = VK_NULL_HANDLE;  // exported shared timeline semaphore
+    VkSemaphore timeline_ = VK_NULL_HANDLE;  // exported PRODUCE timeline: core signals 2f+2, host waits it
     void* sync_handle_ = nullptr;            // exported NT handle for timeline_ (owned)
+    // Exported CONSUME timeline: the HOST signals 2f+3 after its composite of frame f finishes reading the
+    // shared slot; the core ONLY waits on this before reusing that slot. A one-directional channel the core
+    // never signals — so its reuse wait cannot be satisfied by the core's own produce signals (the bug the
+    // single shared timeline had for N>=2 slots). Exported to the core via rp_surface_set.consume_sync_handle.
+    VkSemaphore consume_timeline_ = VK_NULL_HANDLE;
+    void* consume_sync_handle_ = nullptr;    // exported NT handle for consume_timeline_ (owned)
     uint32_t width_ = 0, height_ = 0;
 
     // Headless composite path (lazily created on first composite_and_present call).

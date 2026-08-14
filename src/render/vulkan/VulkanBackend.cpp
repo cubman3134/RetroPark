@@ -222,6 +222,8 @@ void VulkanBackend::destroy_surfaces() {
     surfaces_.clear();
     if (timeline_) { vkDestroySemaphore(device_, timeline_, nullptr); timeline_ = VK_NULL_HANDLE; }
     if (sync_handle_) { CloseHandle(static_cast<HANDLE>(sync_handle_)); sync_handle_ = nullptr; }
+    if (consume_timeline_) { vkDestroySemaphore(device_, consume_timeline_, nullptr); consume_timeline_ = VK_NULL_HANDLE; }
+    if (consume_sync_handle_) { CloseHandle(static_cast<HANDLE>(consume_sync_handle_)); consume_sync_handle_ = nullptr; }
 }
 
 rp_result VulkanBackend::allocate_surfaces(uint32_t count, uint32_t w, uint32_t h,
@@ -326,6 +328,20 @@ rp_result VulkanBackend::allocate_surfaces(uint32_t count, uint32_t w, uint32_t 
     HANDLE sh = nullptr;
     VK_CHECK(pfnGetSemHandle(device_, &sgi, &sh), err, "vkGetSemaphoreWin32HandleKHR");
     sync_handle_ = sh;   // owned; closed in destroy_surfaces()
+
+    // A SECOND exported timeline: the consume channel. The host signals it (2f+3) after the composite of
+    // frame f completes on the GPU; the core waits on it before reusing the slot frame f used. It is a
+    // separate semaphore precisely so the core's own produce signals cannot advance it past the host's
+    // real release — the multi-slot back-pressure that the single shared timeline could not express.
+    VkSemaphore consume_sem = VK_NULL_HANDLE;
+    VK_CHECK(vkCreateSemaphore(device_, &sci, nullptr, &consume_sem), err, "vkCreateSemaphore (consume)");
+    consume_timeline_ = consume_sem;
+    VkSemaphoreGetWin32HandleInfoKHR csgi{VK_STRUCTURE_TYPE_SEMAPHORE_GET_WIN32_HANDLE_INFO_KHR};
+    csgi.semaphore = consume_timeline_;
+    csgi.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    HANDLE csh = nullptr;
+    VK_CHECK(pfnGetSemHandle(device_, &csgi, &csh), err, "vkGetSemaphoreWin32HandleKHR (consume)");
+    consume_sync_handle_ = csh;   // owned; closed in destroy_surfaces()
 
     return RP_OK;
 }
@@ -510,10 +526,16 @@ rp_result VulkanBackend::composite_and_present(uint32_t ready_index, uint64_t sy
 
     VK_CHECK(vkEndCommandBuffer(composite_cmd_), err, "end composite cmd");
 
-    // Wait the shared timeline >= sync_value (the core's producer signal) before the
-    // GPU touches its image, and signal sync_value+1 once this composite is done. Only
-    // on a new frame: a repeat re-samples the already-owned image and must leave the
-    // timeline strictly increasing (re-signalling a reached value is illegal).
+    // Wait the PRODUCE timeline >= sync_value (the core's producer signal) before the GPU touches its
+    // image, and signal the CONSUME value sync_value+1 once this composite finishes reading it. The
+    // consume signal goes on the separate consume_timeline_ for the multi-slot ring (slot_count>=2): the
+    // channel the core waits on before reuse, kept off the produce timeline so the core's own produce
+    // signals can't race/self-satisfy it. For a single shared image (slot_count==1) the protocol is
+    // lock-step and the peer waits the PRODUCE timeline (the rp_dolphin_boot path is never handed a
+    // consume handle), so signal 2f+3 there — the original single-timeline behavior, race-free because
+    // lock-step lets the core produce only after the host's consume. Only on a new frame: a repeat
+    // re-samples the already-owned image and must leave each timeline strictly increasing.
+    VkSemaphore consumeSem = (surfaces_.size() >= 2 && consume_timeline_) ? consume_timeline_ : timeline_;
     uint64_t waitValue = sync_value, signalValue = sync_value + 1;
     VkTimelineSemaphoreSubmitInfo tssi{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
@@ -524,7 +546,7 @@ rp_result VulkanBackend::composite_and_present(uint32_t ready_index, uint64_t sy
         tssi.signalSemaphoreValueCount = 1; tssi.pSignalSemaphoreValues = &signalValue;
         si.pNext = &tssi;
         si.waitSemaphoreCount = 1; si.pWaitSemaphores = &timeline_; si.pWaitDstStageMask = &waitStage;
-        si.signalSemaphoreCount = 1; si.pSignalSemaphores = &timeline_;
+        si.signalSemaphoreCount = 1; si.pSignalSemaphores = &consumeSem;
     }
     VK_CHECK(vkQueueSubmit(queue_, 1, &si, composite_fence_), err, "composite queue submit");
 
@@ -627,9 +649,12 @@ rp_result VulkanBackend::present_windowed(uint32_t ready_index, uint64_t sync_va
     waitVals[nWait] = 0; ++nWait;
     sigSems[nSig] = present_sems_[imageIndex]; sigVals[nSig] = 0; ++nSig;
     if (new_frame) {
+        // Wait the PRODUCE timeline (2f+2); signal the CONSUME value (2f+3) on the separate consume
+        // timeline for the multi-slot ring, else on the produce timeline (single-image lock-step).
         waitSems[nWait] = timeline_; waitStages[nWait] = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
         waitVals[nWait] = sync_value; ++nWait;
-        sigSems[nSig] = timeline_; sigVals[nSig] = sync_value + 1; ++nSig;
+        sigSems[nSig] = (surfaces_.size() >= 2 && consume_timeline_) ? consume_timeline_ : timeline_;
+        sigVals[nSig] = sync_value + 1; ++nSig;
     }
 
     VkTimelineSemaphoreSubmitInfo tssi{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
