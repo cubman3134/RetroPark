@@ -41,7 +41,9 @@ add_executable(retropark_tests
   test_static_core.cpp
   test_gl_context.cpp
   test_gl_compositor.cpp
-  test_gl_nes_e2e.cpp)
+  test_gl_nes_e2e.cpp
+  test_hwrender_gl.cpp
+  ${CMAKE_SOURCE_DIR}/cores/libretro_shim/HwRenderGL.cpp)
 target_link_libraries(retropark_tests PRIVATE retropark doctest::doctest nlohmann_json::nlohmann_json retropark_libretro_convert)
 
 # Slice P: statically link refcore_driven into the test binary TWICE with renamed getters, to prove a
