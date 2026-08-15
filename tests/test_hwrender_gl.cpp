@@ -8,8 +8,8 @@ TEST_CASE("hwrender gl: FBO readback is top-origin (flip works)") {
     REQUIRE(hw.setup(/*depth*/true,/*stencil*/false,/*bottom_left_origin*/true, 8, 8, 3, 3, err));
     REQUIRE(hw.make_current());
     hw.test_fill(0,255,0, 255,0,0);   // top green, bottom red (in visual/top-origin terms)
-    uint32_t pitch = 0;
-    const uint8_t* px = static_cast<const uint8_t*>(hw.read_frame(8, 8, pitch));
+    uint32_t rw = 8, rh = 8, pitch = 0;   // read_frame clamps w/h in place -> pass lvalues
+    const uint8_t* px = static_cast<const uint8_t*>(hw.read_frame(rw, rh, pitch));
     REQUIRE(px); REQUIRE(pitch == 8*4);
     // Row 0 is the TOP of the image -> should be green; last row -> red.
     CHECK(px[1] > 200); CHECK(px[0] < 60);                       // row 0 green

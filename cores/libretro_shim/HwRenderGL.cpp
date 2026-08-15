@@ -29,8 +29,8 @@ bool HwRenderGL::setup(bool depth, bool stencil, bool blo, uint32_t maxW, uint32
     return true;
 }
 
-const void* HwRenderGL::read_frame(uint32_t w, uint32_t h, uint32_t& out_pitch) {
-    if (w > maxW_) w = maxW_; if (h > maxH_) h = maxH_;
+const void* HwRenderGL::read_frame(uint32_t& w, uint32_t& h, uint32_t& out_pitch) {
+    if (w > maxW_) w = maxW_; if (h > maxH_) h = maxH_;   // clamp the CALLER's w/h (crop, don't drop)
     out_pitch = w * 4;
     const GLFns& g = ctx_.gl();
     g.BindFramebuffer(GL_FRAMEBUFFER, fbo_);

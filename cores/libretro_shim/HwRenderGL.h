@@ -14,7 +14,10 @@ public:
     bool make_current() { return ctx_.make_current(); }   // before each retro_run
     // Read the w*h region of the FBO to top-origin RGBA8; returns an internal buffer valid until the next
     // call. out_pitch = w*4. Flips rows iff the core uses bottom-left origin (GL default).
-    const void* read_frame(uint32_t w, uint32_t h, uint32_t& out_pitch);
+    // Reads the w*h region of the FBO to top-origin RGBA8. w/h are clamped IN PLACE to the FBO's max
+    // geometry (so an oversize report is cropped, not dropped) and out_pitch is set to the clamped w*4;
+    // the caller must forward the (possibly reduced) w/h + out_pitch, not the originals.
+    const void* read_frame(uint32_t& w, uint32_t& h, uint32_t& out_pitch);
     uint32_t max_w() const { return maxW_; }
     uint32_t max_h() const { return maxH_; }
     // Test-only: paint the FBO's GL-top half to (tr,tg,tb) and GL-bottom half to (br,bg,bb) via scissor-clear,

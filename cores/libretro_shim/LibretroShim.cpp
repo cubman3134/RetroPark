@@ -408,12 +408,16 @@ rp_result sh_load_content(rp_core* core, const char* path) {
     // is known, stand up HwRenderGL's FBO and fire context_reset so the core builds its GL objects.
     if (s->hw_requested) {
         rp_av_info av{}; sh_get_av_info(core, &av);     // reuse the shim's av-info query for max geometry
-        uint32_t mw = av.max_width ? av.max_width : av.base_width;
-        uint32_t mh = av.max_height ? av.max_height : av.base_height;
+        // Mirror the runtime's max(max,base) so a malformed core with max<base still gets an FBO big enough
+        // for the frames the runtime will accept (else every frame fails the runtime's pitch/size gate).
+        // (Ternary, not std::max -- windows.h defines a max() macro here that would clobber it.)
+        uint32_t mw = av.max_width > av.base_width ? av.max_width : av.base_width;
+        uint32_t mh = av.max_height > av.base_height ? av.max_height : av.base_height;
         s->hw = std::make_unique<rp::HwRenderGL>();
         std::string e;
         if (!s->hw->setup(s->hw_cb.depth, s->hw_cb.stencil, s->hw_cb.bottom_left_origin,
                           mw, mh, (int)s->hw_cb.version_major, (int)s->hw_cb.version_minor, e)) {
+            if (s->retro_unload_game) s->retro_unload_game();   // unwind the load the core already did
             s->hw.reset(); s->game_loaded = false;
             return RP_ERR_DEVICE;                        // HW core can't run without its GL context
         }
@@ -463,6 +467,12 @@ rp_result sh_unserialize(rp_core* core, const void* data, size_t size) {
 
 void sh_destroy(rp_core* core) {
     auto* s = reinterpret_cast<Shim*>(core);
+    // HW-render teardown: the core's GL cleanup (context_destroy + any GL frees inside retro_unload_game/
+    // retro_deinit) must run against OUR GL context. Under the OpenGL host, composite_driven leaves the
+    // HOST context current after each present, so without this the core would delete the host's GL objects
+    // (per-context name spaces both start at 1) -> corrupted host rendering. Make ours current + fire the
+    // core's context_destroy first (part of the libretro HW contract; GLideN64 hangs cleanup on it).
+    if (s->hw) { s->hw->make_current(); if (s->hw_cb.context_destroy) s->hw_cb.context_destroy(); }
     if (s->game_loaded && s->retro_unload_game) s->retro_unload_game();
     if (s->retro_deinit) s->retro_deinit();
     if (s->lib) FreeLibrary(s->lib);
