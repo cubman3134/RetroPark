@@ -7,6 +7,7 @@
 #include "PixelConvert.h"
 #include "HwRenderGL.h"
 #include "libretro.h"
+#include "ShimInput.h"
 #include <vector>
 #include <string>
 #include <fstream>
@@ -237,24 +238,14 @@ void input_poll_cb() {
     }
 }
 
-// Map RetroPark rp_input_state.keys[] (VK codes) to NES buttons, per port. Both ports
-// currently read the same VK keys -- that's fine; netplay feeds each port a distinct
-// rp_input_state, so port 0 and port 1 diverge by what the runtime stores, not by key
-// mapping. Local keyboard control of P2 in the harness is out of scope.
-int16_t input_state_cb(unsigned port, unsigned device, unsigned, unsigned id) {
-    if ((port != 0 && port != 1) || device != RETRO_DEVICE_JOYPAD || !g) return 0;
-    const rp_input_state& in = g->input[port];
-    switch (id) {
-        case RETRO_DEVICE_ID_JOYPAD_UP:     return in.keys[VK_UP]     ? 1 : 0;
-        case RETRO_DEVICE_ID_JOYPAD_DOWN:   return in.keys[VK_DOWN]   ? 1 : 0;
-        case RETRO_DEVICE_ID_JOYPAD_LEFT:   return in.keys[VK_LEFT]   ? 1 : 0;
-        case RETRO_DEVICE_ID_JOYPAD_RIGHT:  return in.keys[VK_RIGHT]  ? 1 : 0;
-        case RETRO_DEVICE_ID_JOYPAD_A:      return in.keys['X']       ? 1 : 0;
-        case RETRO_DEVICE_ID_JOYPAD_B:      return in.keys['Z']       ? 1 : 0;
-        case RETRO_DEVICE_ID_JOYPAD_START:  return in.keys[VK_RETURN] ? 1 : 0;
-        case RETRO_DEVICE_ID_JOYPAD_SELECT: return in.keys[VK_SHIFT]  ? 1 : 0;
-        default: return 0;
-    }
+// Map RetroPark input to libretro, per port. keys[] (VK codes, the NES map) is OR'd with the
+// generic abstract pad (pad_buttons/pad_axes) and ANALOG is answered from the abstract sticks; the
+// pure mapping lives in ShimInput.h (shim_map_input) so it can be unit-tested without a DLL/GL.
+// Both ports read the same rp_input_state[port]; netplay feeds each port a distinct snapshot, so
+// port 0 and port 1 diverge by what the runtime stores, not by the mapping.
+int16_t input_state_cb(unsigned port, unsigned device, unsigned index, unsigned id) {
+    if ((port != 0 && port != 1) || !g) return 0;
+    return shim_map_input(g->input[port], device, index, id);
 }
 
 // per-sample: forward one stereo frame.

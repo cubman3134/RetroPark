@@ -42,6 +42,13 @@ TEST_CASE("hwrender e2e: Mupen64Plus-Next renders a real N64 ROM through GL read
     fprintf(stderr, "[n64] load_content(%s)\n", rom); fflush(stderr);
     REQUIRE(rp_runtime_load_content(rt, rom) == RP_OK);
 
+    // Feed a held abstract-pad input (Start + full-left analog) before pumping. Device-independent
+    // proof the shim polled host input (mirrors the Dolphin input gate): assert poll_count>0 below.
+    rp_input_state held{};
+    held.pad_buttons = (1u << RP_PAD_START);
+    held.pad_axes[RP_AXIS_LEFT_X] = -32767;
+    rp_runtime_set_input(rt, 0, &held);
+
     std::vector<uint8_t> img((size_t)W * H * 4, 0), early, late;
     int good = 0;
     // N64 boot (PIF/IPL + game logos) takes many frames before real rendering; pump generously.
@@ -58,6 +65,9 @@ TEST_CASE("hwrender e2e: Mupen64Plus-Next renders a real N64 ROM through GL read
 
     if (!late.empty()) { FILE* fp = fopen("n64_frame.rgba", "wb"); if (fp) { fwrite(late.data(),1,late.size(),fp); fclose(fp); } }
 
+    uint64_t polls = rp_runtime_input_poll_count(rt);   // capture before teardown
+    fprintf(stderr, "[n64] input_poll_count=%llu\n", (unsigned long long)polls); fflush(stderr);
+
     rp_runtime_unload_core(rt);
     rp_runtime_destroy(rt);
 
@@ -65,4 +75,5 @@ TEST_CASE("hwrender e2e: Mupen64Plus-Next renders a real N64 ROM through GL read
     CHECK(bytesum(late) > (uint64_t)W * H);   // non-black
     REQUIRE(!early.empty());
     CHECK(late != early);                      // advancing
+    CHECK(polls > 0);                          // the shim polled host input at least once
 }
