@@ -39,6 +39,7 @@ target_sources(retropark PRIVATE
   src/render/vulkan/VulkanBackend.cpp
   src/render/vulkan/VulkanCompositor.cpp
   src/render/gl/GLContext.cpp
+  src/render/gl/GLCompositor.cpp
   src/runtime/BackendFactory.cpp
   src/runtime/Runtime.cpp
   src/audio/AudioPool.cpp

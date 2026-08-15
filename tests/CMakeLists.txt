@@ -39,7 +39,8 @@ add_executable(retropark_tests
   test_dolphin_savestate_e2e.cpp
   test_dolphin_netplay_e2e.cpp
   test_static_core.cpp
-  test_gl_context.cpp)
+  test_gl_context.cpp
+  test_gl_compositor.cpp)
 target_link_libraries(retropark_tests PRIVATE retropark doctest::doctest nlohmann_json::nlohmann_json retropark_libretro_convert)
 
 # Slice P: statically link refcore_driven into the test binary TWICE with renamed getters, to prove a
