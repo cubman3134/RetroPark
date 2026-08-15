@@ -15,4 +15,8 @@ TEST_CASE("gl context: probe + make a 3.3-core context") {
     ctx.gl().GetIntegerv(0x821B /*GL_MAJOR_VERSION*/, &major);
     ctx.gl().GetIntegerv(0x821C /*GL_MINOR_VERSION*/, &minor);
     CHECK((major > 3 || (major == 3 && minor >= 3)));
+    CHECK(ctx.gl().GenRenderbuffers != nullptr);
+    CHECK(ctx.gl().RenderbufferStorage != nullptr);
+    CHECK(ctx.gl().FramebufferRenderbuffer != nullptr);
+    CHECK(ctx.gl().BindRenderbuffer != nullptr);
 }

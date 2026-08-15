@@ -41,6 +41,13 @@ struct GLFns {
     void (WINAPI *UseProgram)(GLuint); void (WINAPI *DeleteShader)(GLuint);
     GLint (WINAPI *GetUniformLocation)(GLuint,const GLchar*); void (WINAPI *Uniform1i)(GLint,GLint);
     void (WINAPI *ActiveTexture)(GLenum);
+    void (WINAPI *GenRenderbuffers)(GLsizei,GLuint*);
+    void (WINAPI *BindRenderbuffer)(GLenum,GLuint);
+    void (WINAPI *RenderbufferStorage)(GLenum,GLenum,GLsizei,GLsizei);
+    void (WINAPI *FramebufferRenderbuffer)(GLenum,GLenum,GLenum,GLuint);
+    void (WINAPI *Enable)(GLenum);
+    void (WINAPI *Disable)(GLenum);
+    void (WINAPI *Scissor)(GLint,GLint,GLsizei,GLsizei);
 };
 
 class GLContext {
@@ -50,7 +57,7 @@ public:
     GLContext(const GLContext&) = delete; GLContext& operator=(const GLContext&) = delete;
 
     // native_window == nullptr => headless (hidden window). Creates a GL 3.3-core context + loads GLFns.
-    bool initialize(void* native_window, uint32_t w, uint32_t h, std::string& err);
+    bool initialize(void* native_window, uint32_t w, uint32_t h, std::string& err, int major = 3, int minor = 3);
     bool make_current();
     void present();          // SwapBuffers (windowed) / glFlush (headless)
     const GLFns& gl() const { return fns_; }

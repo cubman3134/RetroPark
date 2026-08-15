@@ -48,7 +48,7 @@ static void* gl_sym(HMODULE glMod, const char* name) {
     return p;
 }
 
-bool GLContext::initialize(void* native_window, uint32_t w, uint32_t h, std::string& err) {
+bool GLContext::initialize(void* native_window, uint32_t w, uint32_t h, std::string& err, int major, int minor) {
     destroy();
     w_ = w; h_ = h;
     PFNWGLCREATECTXATTRIBS createAttribs = nullptr; PFNWGLCHOOSEPIXELFMT choosePf = nullptr;
@@ -69,8 +69,10 @@ bool GLContext::initialize(void* native_window, uint32_t w, uint32_t h, std::str
     DescribePixelFormat(hdc_, pf, sizeof(pfd), &pfd);
     if (!SetPixelFormat(hdc_, pf, &pfd)) { err = "SetPixelFormat"; return false; }
 
+    int cmaj = major, cmin = minor;
+    if (cmaj < 3 || (cmaj == 3 && cmin < 3)) { cmaj = 3; cmin = 3; }
     const int ctxAttribs[] = {
-        WGL_CONTEXT_MAJOR_VERSION_ARB, 3, WGL_CONTEXT_MINOR_VERSION_ARB, 3,
+        WGL_CONTEXT_MAJOR_VERSION_ARB, cmaj, WGL_CONTEXT_MINOR_VERSION_ARB, cmin,
         WGL_CONTEXT_PROFILE_MASK_ARB, WGL_CONTEXT_CORE_PROFILE_BIT_ARB, 0 };
     hglrc_ = createAttribs(hdc_, nullptr, ctxAttribs);
     if (!hglrc_) { err = "no 3.3-core context"; return false; }
@@ -92,6 +94,9 @@ bool GLContext::initialize(void* native_window, uint32_t w, uint32_t h, std::str
     LD(GetProgramiv,"glGetProgramiv") LD(GetProgramInfoLog,"glGetProgramInfoLog") LD(UseProgram,"glUseProgram")
     LD(DeleteShader,"glDeleteShader") LD(GetUniformLocation,"glGetUniformLocation") LD(Uniform1i,"glUniform1i")
     LD(ActiveTexture,"glActiveTexture")
+    LD(GenRenderbuffers,"glGenRenderbuffers") LD(BindRenderbuffer,"glBindRenderbuffer")
+    LD(RenderbufferStorage,"glRenderbufferStorage") LD(FramebufferRenderbuffer,"glFramebufferRenderbuffer")
+    LD(Enable,"glEnable") LD(Disable,"glDisable") LD(Scissor,"glScissor")
     #undef LD
     return true;
 }
