@@ -1,7 +1,10 @@
-add_library(LibretroShim SHARED LibretroShim.cpp)
+add_library(LibretroShim SHARED
+  LibretroShim.cpp
+  HwRenderGL.cpp
+  ${CMAKE_SOURCE_DIR}/src/render/gl/GLContext.cpp)
 target_include_directories(LibretroShim PRIVATE
-  ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/external/libretro)
-target_link_libraries(LibretroShim PRIVATE retropark_libretro_convert)
+  ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/external/libretro ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(LibretroShim PRIVATE retropark_libretro_convert opengl32 gdi32)
 
 set(SHIM_OUT $<TARGET_FILE_DIR:LibretroShim>/cores/libretro_shim)
 add_custom_command(TARGET LibretroShim POST_BUILD

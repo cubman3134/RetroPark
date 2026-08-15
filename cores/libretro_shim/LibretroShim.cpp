@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <retropark/retropark.h>
 #include "PixelConvert.h"
+#include "HwRenderGL.h"
 #include "libretro.h"
 #include <vector>
 #include <string>
@@ -12,6 +13,7 @@
 #include <sstream>
 #include <cstdint>
 #include <cstdarg>
+#include <memory>
 #include <unordered_map>
 
 #define RP_EXPORT extern "C" __declspec(dllexport)
@@ -45,6 +47,11 @@ struct Shim {
     std::vector<uint8_t> rom;       // content buffer
     std::string sys_dir;            // returned to the core (writable path)
     bool game_loaded = false;
+    // HW-render (B1). Set when a core requests desktop-GL SET_HW_RENDER; the shim renders the core into
+    // HwRenderGL's FBO and reads it back to CPU RGBA, so the runtime still sees a driven core.
+    retro_hw_render_callback hw_cb{};
+    bool hw_requested = false;
+    std::unique_ptr<rp::HwRenderGL> hw;
     rp_input_state input[2]{};      // last input snapshot from RetroPark, per port
     // Core option defaults captured from RETRO_ENVIRONMENT_SET_VARIABLES (legacy variable
     // API), keyed by option key. Populated once at retro_set_environment-driven negotiation,
@@ -85,6 +92,21 @@ Shim* g = nullptr;
 // No-op logger handed to the core via GET_LOG_INTERFACE. Variadic, cdecl to match
 // retro_log_printf_t. Discards everything; the shim is headless.
 void RETRO_CALLCONV shim_log(enum retro_log_level, const char*, ...) {}
+
+// --- HW-render frontend GL getters (B1). Handed to the core in the SET_HW_RENDER struct so it can
+// render into our FBO and load its own GL entrypoints. RETRO_CALLCONV to match the libretro typedefs. ---
+// get_current_framebuffer: the FBO the core renders into (0 before setup / for SW cores).
+uintptr_t RETRO_CALLCONV hw_get_current_framebuffer() { return g && g->hw ? g->hw->fbo_id() : 0; }
+// get_proc_address: the core loads its OWN GL through this (wgl first, opengl32 fallback for GL 1.1 syms).
+retro_proc_address_t RETRO_CALLCONV hw_get_proc_address(const char* sym) {
+    if (!sym) return nullptr;
+    void* p = (void*)wglGetProcAddress(sym);
+    if (p == nullptr || p == (void*)0x1 || p == (void*)0x2 || p == (void*)0x3 || p == (void*)-1) {
+        static HMODULE gl = GetModuleHandleA("opengl32.dll");
+        p = (void*)GetProcAddress(gl, sym);
+    }
+    return reinterpret_cast<retro_proc_address_t>(p);
+}
 
 // --- libretro environment callback (C, must be global) ---
 bool env_cb(unsigned cmd, void* data) {
@@ -169,15 +191,37 @@ bool env_cb(unsigned cmd, void* data) {
         case RETRO_ENVIRONMENT_SET_GEOMETRY:
         case RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO:
             return true;
-        case RETRO_ENVIRONMENT_SET_HW_RENDER:
-            return false;   // force software rendering
+        case RETRO_ENVIRONMENT_SET_HW_RENDER: {
+            auto* cb = static_cast<retro_hw_render_callback*>(data);
+            if (!cb) return false;
+            // Desktop GL only (B1). GLES/Vulkan/etc. -> reject; the core falls back to SW or fails.
+            if (cb->context_type != RETRO_HW_CONTEXT_OPENGL &&
+                cb->context_type != RETRO_HW_CONTEXT_OPENGL_CORE)
+                return false;
+            g->hw_cb = *cb;
+            g->hw_requested = true;
+            g->hw_cb.get_current_framebuffer = hw_get_current_framebuffer;
+            g->hw_cb.get_proc_address = hw_get_proc_address;
+            // The core reads get_current_framebuffer/get_proc_address back from ITS struct, so write them
+            // into the caller's struct too:
+            cb->get_current_framebuffer = hw_get_current_framebuffer;
+            cb->get_proc_address = hw_get_proc_address;
+            return true;
+        }
         default:
             return false;
     }
 }
 
 void video_cb(const void* data, unsigned w, unsigned h, size_t pitch) {
-    if (!data || w == 0 || h == 0) {   // duplicate frame
+    if (data == RETRO_HW_FRAME_BUFFER_VALID) {          // HW-render: the core drew into our FBO
+        uint32_t p = 0;
+        const void* rgba = g->hw ? g->hw->read_frame(w, h, p) : nullptr;
+        if (rgba) g->host.video_refresh(g->host.host, rgba, w, h, p);
+        else      g->host.video_refresh(g->host.host, nullptr, w, h, 0);
+        return;
+    }
+    if (!data || w == 0 || h == 0) {   // duplicate frame (SW or HW dupe)
         g->host.video_refresh(g->host.host, nullptr, w, h, 0);
         return;
     }
@@ -340,6 +384,8 @@ rp_core* sh_create(const rp_host_iface* host) {
     return reinterpret_cast<rp_core*>(s);
 }
 
+void sh_get_av_info(rp_core* core, rp_av_info* out);   // fwd: HW-render setup below queries max geometry
+
 rp_result sh_load_content(rp_core* core, const char* path) {
     auto* s = reinterpret_cast<Shim*>(core);
     if (!path || !*path) return RP_ERR_BAD_ARG;
@@ -357,6 +403,23 @@ rp_result sh_load_content(rp_core* core, const char* path) {
     }
     if (!s->retro_load_game(&gi)) return RP_ERR_UNSUPPORTED;
     s->game_loaded = true;
+
+    // HW-render (B1): the core requested a desktop-GL context during set_environment. Now that geometry
+    // is known, stand up HwRenderGL's FBO and fire context_reset so the core builds its GL objects.
+    if (s->hw_requested) {
+        rp_av_info av{}; sh_get_av_info(core, &av);     // reuse the shim's av-info query for max geometry
+        uint32_t mw = av.max_width ? av.max_width : av.base_width;
+        uint32_t mh = av.max_height ? av.max_height : av.base_height;
+        s->hw = std::make_unique<rp::HwRenderGL>();
+        std::string e;
+        if (!s->hw->setup(s->hw_cb.depth, s->hw_cb.stencil, s->hw_cb.bottom_left_origin,
+                          mw, mh, (int)s->hw_cb.version_major, (int)s->hw_cb.version_minor, e)) {
+            s->hw.reset(); s->game_loaded = false;
+            return RP_ERR_DEVICE;                        // HW core can't run without its GL context
+        }
+        s->hw->make_current();
+        if (s->hw_cb.context_reset) s->hw_cb.context_reset();   // core builds its GL objects
+    }
     return RP_OK;
 }
 
@@ -375,7 +438,10 @@ void sh_get_av_info(rp_core* core, rp_av_info* out) {
 
 void sh_run_frame(rp_core* core) {
     auto* s = reinterpret_cast<Shim*>(core);
-    if (s->game_loaded) s->retro_run();
+    if (s->game_loaded) {
+        if (s->hw) s->hw->make_current();   // HW cores render into our FBO under this context
+        s->retro_run();
+    }
 }
 
 size_t sh_serialize_size(rp_core* core) {
