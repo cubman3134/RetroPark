@@ -108,7 +108,10 @@ rp_result Runtime::rebuild_surfaces(std::string& err) {
     uint64_t gen = ring_.reallocate(width_, height_);
     have_last_ready_ = false;   // ring timeline was just rebuilt; a stale (idx,sv) would misfire
     for (auto& d : descs) d.generation = gen;
-    if (loader_.state() == LoaderState::Created) {
+    // Only presenting cores consume the shared-surface set; driven cores composite host-side and
+    // may not implement set_surfaces (refcore_driven leaves it null -> UNSUPPORTED). Pushing to them
+    // would break Runtime::resize on a loaded driven core, so skip the handoff for driven cores.
+    if (core_type_ == RP_CORE_PRESENTING && loader_.state() == LoaderState::Created) {
         rp_surface_set set{};
         set.count = (uint32_t)descs.size();
         set.surfaces = descs.data();
@@ -132,7 +135,9 @@ rp_result Runtime::resize(uint32_t w, uint32_t h) {
     if (!init_ok_) return RP_ERR_DEVICE;
     rp_result r = rebuild_surfaces(err);
     if (r != RP_OK) return r;
-    if (loader_.state() == LoaderState::Created) return loader_.start(err);
+    // Restart only presenting cores (rebuild_surfaces stopped them to re-hand surfaces). Driven cores
+    // run via run_frame from the Created state and never implement start (UNSUPPORTED), so leave them.
+    if (core_type_ == RP_CORE_PRESENTING && loader_.state() == LoaderState::Created) return loader_.start(err);
     return RP_OK;
 }
 
