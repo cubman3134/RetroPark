@@ -1,0 +1,3 @@
+{ "id":"libretro_shim", "name":"libretro Shim (Mupen64Plus-Next)", "type":"driven",
+  "abi_version":4, "graphics_api":"none", "entry":"LibretroShim.dll",
+  "libretro_core":"mupen64plus_next_libretro.dll" }

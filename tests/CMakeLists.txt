@@ -43,6 +43,7 @@ add_executable(retropark_tests
   test_gl_compositor.cpp
   test_gl_nes_e2e.cpp
   test_hwrender_gl.cpp
+  test_hwrender_n64_e2e.cpp
   ${CMAKE_SOURCE_DIR}/cores/libretro_shim/HwRenderGL.cpp)
 target_link_libraries(retropark_tests PRIVATE retropark doctest::doctest nlohmann_json::nlohmann_json retropark_libretro_convert)
 
