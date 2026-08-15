@@ -56,6 +56,9 @@ public:
     const GLFns& gl() const { return fns_; }
     bool windowed() const { return owns_window_ == false; }  // we own a hidden window only when headless
     uint32_t width() const { return w_; } uint32_t height() const { return h_; }
+    // Live client-area size of the presenting window (windowed only), for scaling the
+    // windowed viewport to fill the window instead of the core's native render size.
+    void client_size(uint32_t& w, uint32_t& h) const;
 
     // Can a 3.3-core context be created on this machine? (headless probe; used to gate tests)
     static bool probe();

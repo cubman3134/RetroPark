@@ -69,9 +69,14 @@ rp_result GLBackend::composite_driven(const void* data, uint32_t width, uint32_t
         }
         g.PixelStorei(GL_UNPACK_ROW_LENGTH,0);
     }
-    // Draw into the target (headless FBO / windowed default framebuffer).
+    // Draw into the target (headless FBO / windowed default framebuffer). Headless uses the
+    // core's native render size (width_/height_) so the readback matches; windowed scales the
+    // fullscreen triangle to the actual window client area so the game fills the window (LINEAR
+    // filtering upscales smoothly), matching the D3D11/Vulkan windowed backends.
     g.BindFramebuffer(GL_FRAMEBUFFER, headless_?fbo_:0);
-    g.Viewport(0,0,(GLsizei)width_,(GLsizei)height_);
+    GLsizei vw=(GLsizei)width_, vh=(GLsizei)height_;
+    if (!headless_) { uint32_t cw=0,ch=0; ctx_.client_size(cw,ch); if (cw && ch) { vw=(GLsizei)cw; vh=(GLsizei)ch; } }
+    g.Viewport(0,0,vw,vh);
     g.ClearColor(0,0,0,1); g.Clear(GL_COLOR_BUFFER_BIT);
     if (tex_w_) comp_.draw(g, frame_tex_);
     if (headless_ && out_rgba) {

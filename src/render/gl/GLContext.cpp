@@ -97,6 +97,12 @@ bool GLContext::initialize(void* native_window, uint32_t w, uint32_t h, std::str
 }
 
 bool GLContext::make_current() { return hdc_ && hglrc_ && wglMakeCurrent(hdc_, hglrc_); }
+void GLContext::client_size(uint32_t& w, uint32_t& h) const {
+    RECT rc{};
+    if (hwnd_ && GetClientRect(hwnd_, &rc) && rc.right > rc.left && rc.bottom > rc.top) {
+        w = (uint32_t)(rc.right - rc.left); h = (uint32_t)(rc.bottom - rc.top);
+    } else { w = w_; h = h_; }   // fall back to the configured size
+}
 void GLContext::present() { if (windowed()) SwapBuffers(hdc_); }   // headless: readback handles sync
 void GLContext::destroy() {
     if (hglrc_) { wglMakeCurrent(nullptr,nullptr); wglDeleteContext(hglrc_); hglrc_=nullptr; }

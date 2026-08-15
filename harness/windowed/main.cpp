@@ -134,9 +134,10 @@ static void attach_console_output() {
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     attach_console_output();
-    // Parse `--api vulkan|d3d11` (default d3d11), `--driven`, and `--content <rom>`
+    // Parse `--api vulkan|gl|d3d11` (default d3d11), `--driven`, and `--content <rom>`
     // (the next arg is the ROM path) from the process command line.
     bool use_vulkan = false;
+    bool use_gl = false;
     bool use_driven = false;
     std::string content_path;
     std::string custom_core_dir;
@@ -153,9 +154,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
             for (int i = 0; i < argc; i++) {
                 std::wstring a = argv[i];
                 if (a == L"--api" && i + 1 < argc) {
-                    if (std::wstring(argv[i + 1]) == L"vulkan") use_vulkan = true;
+                    std::wstring v = argv[i + 1];
+                    if (v == L"vulkan") use_vulkan = true;
+                    else if (v == L"gl" || v == L"opengl") use_gl = true;
                 } else if (a == L"--api=vulkan") {
                     use_vulkan = true;
+                } else if (a == L"--api=gl" || a == L"--api=opengl") {
+                    use_gl = true;
                 } else if (a == L"--driven") {
                     use_driven = true;
                 } else if (a == L"--content" && i + 1 < argc) {
@@ -181,17 +186,21 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         }
     }
     const bool use_content = !content_path.empty();
-    const rp_graphics_api api = use_vulkan ? RP_GFX_VULKAN : RP_GFX_D3D11;
+    const rp_graphics_api api = use_gl ? RP_GFX_OPENGL : (use_vulkan ? RP_GFX_VULKAN : RP_GFX_D3D11);
+    // The OpenGL host backend supports DRIVEN cores only (GLBackend returns UNSUPPORTED for
+    // presenting cores), so `--api gl` always selects a driven core -- the libretro shim on
+    // the --content path, else refcore_driven -- never a refcore_present*/_VK presenting core.
+    const bool want_driven = use_driven || use_gl;
     const char* core_dir = use_content
         ? RP_HARNESS_SHIM_DIR
-        : (use_driven
+        : (want_driven
             ? RP_HARNESS_DRIVEN_CORE_DIR
             : (use_vulkan ? RP_HARNESS_CORE_DIR_VK : RP_HARNESS_CORE_DIR));
     // Identifies the loaded core to the netplay handshake; both machines must load the same
     // core and pass the same id here, or start_host/start_join reject the mismatch.
     const char* core_id = use_content
         ? "fceumm"
-        : (use_driven ? "refcore_driven" : (use_vulkan ? "refcore_present_vk" : "refcore_present"));
+        : (want_driven ? "refcore_driven" : (use_vulkan ? "refcore_present_vk" : "refcore_present"));
 
     WNDCLASSW wc{}; wc.lpfnWndProc = WndProc; wc.hInstance = hInst; wc.lpszClassName = L"RetroParkHarness";
     RegisterClassW(&wc);
@@ -268,7 +277,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     // Rewind only makes sense against a serialize-capable driven/content core; on a plain
     // presenting core this returns RP_ERR_UNSUPPORTED and g_rewind_enabled just stays false,
     // making the held rewind key a harmless no-op below.
-    if (use_content || use_driven) {
+    if (use_content || want_driven) {
         g_rewind_enabled = (rp_runtime_set_rewind(g_rt, 1, 600) == RP_OK);
         if (!g_rewind_enabled) printf("[harness] rewind unsupported for this core\n");
     }
