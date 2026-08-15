@@ -38,6 +38,7 @@ target_sources(retropark PRIVATE
   src/render/d3d11/D3D11Compositor.cpp
   src/render/vulkan/VulkanBackend.cpp
   src/render/vulkan/VulkanCompositor.cpp
+  src/render/gl/GLContext.cpp
   src/runtime/BackendFactory.cpp
   src/runtime/Runtime.cpp
   src/audio/AudioPool.cpp
@@ -54,7 +55,7 @@ target_compile_features(retropark PUBLIC cxx_std_17)
 target_link_libraries(retropark PUBLIC nlohmann_json::nlohmann_json)
 target_link_libraries(retropark PUBLIC Vulkan::Vulkan)
 if (WIN32)
-  target_link_libraries(retropark PUBLIC d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32)
+  target_link_libraries(retropark PUBLIC d3d11 dxgi dxguid d3dcompiler xaudio2 ole32 ws2_32 opengl32 gdi32)
 endif()
 
 # Vulkan compositor shaders, embedded as SPIR-V headers (see cmake/Shaders.cmake).

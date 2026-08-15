@@ -30,7 +30,8 @@ typedef enum rp_core_type {
 typedef enum rp_graphics_api {
     RP_GFX_D3D11 = 0,
     RP_GFX_VULKAN = 1,
-    RP_GFX_NONE = 2             /* driven cores: no host-managed swapchain */
+    RP_GFX_NONE = 2,            /* driven cores: no host-managed swapchain */
+    RP_GFX_OPENGL = 3          /* OpenGL host compositor (driven cores). Additive: no ABI-version bump. */
 } rp_graphics_api;
 
 typedef enum rp_pixel_format {
