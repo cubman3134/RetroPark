@@ -57,10 +57,13 @@ public:
     GLContext(const GLContext&) = delete; GLContext& operator=(const GLContext&) = delete;
 
     // native_window == nullptr => headless (hidden window). Creates a GL 3.3-core context + loads GLFns.
-    bool initialize(void* native_window, uint32_t w, uint32_t h, std::string& err, int major = 3, int minor = 3);
+    // share_context (an HGLRC) => the new context shares objects (textures, etc.) with it (B2 zero-copy).
+    bool initialize(void* native_window, uint32_t w, uint32_t h, std::string& err, int major = 3, int minor = 3,
+                    void* share_context = nullptr);
     bool make_current();
     void present();          // SwapBuffers (windowed) / glFlush (headless)
     const GLFns& gl() const { return fns_; }
+    void* hglrc() const { return hglrc_; }   // the WGL context handle (to share with)
     bool windowed() const { return owns_window_ == false; }  // we own a hidden window only when headless
     uint32_t width() const { return w_; } uint32_t height() const { return h_; }
     // Live client-area size of the presenting window (windowed only), for scaling the

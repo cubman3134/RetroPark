@@ -48,7 +48,8 @@ static void* gl_sym(HMODULE glMod, const char* name) {
     return p;
 }
 
-bool GLContext::initialize(void* native_window, uint32_t w, uint32_t h, std::string& err, int major, int minor) {
+bool GLContext::initialize(void* native_window, uint32_t w, uint32_t h, std::string& err, int major, int minor,
+                           void* share_context) {
     destroy();
     w_ = w; h_ = h;
     PFNWGLCREATECTXATTRIBS createAttribs = nullptr; PFNWGLCHOOSEPIXELFMT choosePf = nullptr;
@@ -74,7 +75,7 @@ bool GLContext::initialize(void* native_window, uint32_t w, uint32_t h, std::str
     const int ctxAttribs[] = {
         WGL_CONTEXT_MAJOR_VERSION_ARB, cmaj, WGL_CONTEXT_MINOR_VERSION_ARB, cmin,
         WGL_CONTEXT_PROFILE_MASK_ARB, WGL_CONTEXT_CORE_PROFILE_BIT_ARB, 0 };
-    hglrc_ = createAttribs(hdc_, nullptr, ctxAttribs);
+    hglrc_ = createAttribs(hdc_, (HGLRC)share_context, ctxAttribs);
     if (!hglrc_) { err = "no 3.3-core context"; return false; }
     if (!wglMakeCurrent(hdc_, hglrc_)) { err = "wglMakeCurrent"; return false; }
 

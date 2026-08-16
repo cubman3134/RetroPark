@@ -41,6 +41,7 @@ add_executable(retropark_tests
   test_static_core.cpp
   test_gl_context.cpp
   test_gl_compositor.cpp
+  test_gl_external.cpp
   test_gl_nes_e2e.cpp
   test_hwrender_gl.cpp
   test_hwrender_n64_e2e.cpp

@@ -11,6 +11,10 @@ public:
     rp_result composite_and_present(uint32_t, uint64_t, bool, uint8_t*, std::string& err) override;
     rp_result composite_driven(const void* data, uint32_t width, uint32_t height, uint32_t pitch,
                                bool dupe, uint8_t* out_rgba, std::string& err) override;
+    // GL zero-copy (B2): expose the host GL context to share with, and composite an external GL texture directly.
+    void* gl_context() const override;
+    rp_result composite_external_gl(unsigned tex, uint32_t w, uint32_t h, bool bottom_left_origin,
+                                    uint8_t* out_rgba, std::string& err) override;
     static bool probe_gl_shared() { return GLContext::probe(); }
 private:
     rp_result ensure_target(std::string& err);   // (re)create the headless FBO at width_/height_

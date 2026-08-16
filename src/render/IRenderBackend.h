@@ -23,5 +23,13 @@ struct IRenderBackend {
     // waits on before reusing a shared slot (Vulkan multi-slot). null => single-timeline lock-step.
     virtual void* present_consume_sync_handle() const { return nullptr; }
     virtual void  present_device_uuid(uint8_t out[16]) const { for (int i=0;i<16;++i) out[i]=0; }
+
+    // GL zero-copy (B2). The host's GL context handle to share with (GL backend only), and compositing a core-
+    // supplied external GL texture directly. Non-GL backends: no context / unsupported.
+    virtual void* gl_context() const { return nullptr; }
+    virtual rp_result composite_external_gl(unsigned /*tex*/, uint32_t /*w*/, uint32_t /*h*/,
+                                            bool /*bottom_left_origin*/, uint8_t* /*out_rgba*/, std::string& err) {
+        err = "backend has no GL external-texture composite"; return RP_ERR_UNSUPPORTED;
+    }
 };
 }

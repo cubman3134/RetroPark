@@ -92,4 +92,33 @@ rp_result GLBackend::composite_driven(const void* data, uint32_t width, uint32_t
     }
     return RP_OK;
 }
+
+void* GLBackend::gl_context() const { return ctx_.hglrc(); }
+
+rp_result GLBackend::composite_external_gl(unsigned tex, uint32_t w, uint32_t h,
+                                           bool bottom_left_origin, uint8_t* out_rgba, std::string& err) {
+    if (!ready_) { err="not initialized"; return RP_ERR_DEVICE; }
+    if (!ctx_.make_current()) { err="make_current"; return RP_ERR_DEVICE; }
+    const GLFns& g=ctx_.gl();
+    g.BindFramebuffer(GL_FRAMEBUFFER, headless_?fbo_:0);
+    GLsizei vw=(GLsizei)width_, vh=(GLsizei)height_;
+    if (!headless_) { uint32_t cw=0,ch=0; ctx_.client_size(cw,ch); if (cw&&ch){ vw=(GLsizei)cw; vh=(GLsizei)ch; } }
+    g.Viewport(0,0,vw,vh);
+    g.ClearColor(0,0,0,1); g.Clear(GL_COLOR_BUFFER_BIT);
+    // CPU-upload frames are top-origin -> flipV=1 (see composite_driven). An external HW-render FBO texture is
+    // GL bottom-origin -> the OPPOSITE flip. So flipV = bottom_left_origin ? 0 : 1. (Pinned by the flip test.)
+    comp_.draw(g, (GLuint)tex, bottom_left_origin ? 0 : 1);
+    (void)w; (void)h;   // the texture carries its own size; we composite into the host surface (width_/height_)
+    if (headless_ && out_rgba) {
+        g.PixelStorei(GL_PACK_ALIGNMENT,1);
+        std::vector<uint8_t> flip((size_t)width_*height_*4);
+        g.ReadPixels(0,0,(GLsizei)width_,(GLsizei)height_,GL_RGBA,GL_UBYTE,flip.data());
+        const size_t row=(size_t)width_*4;
+        for (uint32_t y=0;y<height_;++y)
+            memcpy(out_rgba+(size_t)y*row, flip.data()+(size_t)(height_-1-y)*row, row);
+    } else {
+        ctx_.present();
+    }
+    return RP_OK;
+}
 } // namespace rp
