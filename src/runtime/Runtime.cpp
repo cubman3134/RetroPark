@@ -28,6 +28,10 @@ static void host_audio_sample(rp_host* h, const int16_t* f, size_t n) {
 static size_t host_audio_want(rp_host* h) {
     return reinterpret_cast<Runtime*>(h)->on_audio_want();
 }
+static void* host_gl_share_context(rp_host* h) { return reinterpret_cast<Runtime*>(h)->on_gl_share_context(); }
+static void host_video_refresh_gl(rp_host* h, unsigned tex, uint32_t w, uint32_t hh, int blo) {
+    reinterpret_cast<Runtime*>(h)->on_video_refresh_gl(tex, w, hh, blo);
+}
 
 Runtime::Runtime(rp_graphics_api api, void* native_window) : native_window_(native_window), api_(api) {
     backend_ = make_backend(api_);
@@ -44,6 +48,8 @@ Runtime::Runtime(rp_graphics_api api, void* native_window) : native_window_(nati
     host_iface_.video_refresh = host_video_refresh;
     host_iface_.audio_sample = host_audio_sample;
     host_iface_.audio_want = host_audio_want;
+    host_iface_.gl_share_context = host_gl_share_context;
+    host_iface_.video_refresh_gl = host_video_refresh_gl;
 }
 
 Runtime::~Runtime() { unload_core(); }
@@ -63,8 +69,15 @@ void Runtime::set_input(uint32_t port, const rp_input_state& in) {
 void Runtime::on_video_refresh(const void* data, uint32_t w, uint32_t h, uint32_t pitch) {
     dr_have_ = true;
     dr_dupe_ = (data == nullptr);
+    dr_is_gl_ = false;              // a CPU frame clears the GL flag; present takes the upload path
     dr_data_ = data;
     dr_w_ = w; dr_h_ = h; dr_pitch_ = pitch;
+}
+void* Runtime::on_gl_share_context() { return backend_ ? backend_->gl_context() : nullptr; }
+void Runtime::on_video_refresh_gl(unsigned tex, uint32_t w, uint32_t h, int blo) {
+    dr_have_ = true; dr_dupe_ = false; dr_is_gl_ = true;
+    dr_gl_tex_ = tex; dr_gl_w_ = w; dr_gl_h_ = h; dr_gl_blo_ = (blo != 0);
+    gl_frames_.fetch_add(1, std::memory_order_relaxed);
 }
 void Runtime::on_audio_sample(const int16_t* frames, size_t n) {
     if (suppress_audio_ || paused_) return; // rollback silence OR paused mute
@@ -241,6 +254,7 @@ rp_result Runtime::unload_core() {
     core_type_ = RP_CORE_PRESENTING;
     dr_data_ = nullptr; dr_w_ = 0; dr_h_ = 0; dr_pitch_ = 0;
     dr_dupe_ = false; dr_have_ = false;
+    dr_is_gl_ = false; dr_gl_tex_ = 0;
     dr_max_w_ = 0; dr_max_h_ = 0;
     requires_content_ = false; content_loaded_ = false;
     if (audio_) { audio_->close(); audio_.reset(); }
@@ -336,6 +350,11 @@ rp_result Runtime::render(uint8_t* out_rgba) {
     if (!backend_) return RP_ERR_DEVICE;
     std::string err;
     if (core_loaded_ && core_type_ == RP_CORE_DRIVEN) {
+        // B2 zero-copy: a GL-producing driven core delivered its frame as an already-GPU-resident
+        // GL texture via video_refresh_gl -- composite it directly, no CPU upload/readback.
+        if (dr_is_gl_ && dr_have_) {
+            return backend_->composite_external_gl(dr_gl_tex_, dr_gl_w_, dr_gl_h_, dr_gl_blo_, out_rgba, err);
+        }
         // Spec §4: a frame with a too-small pitch or dimensions beyond the core's declared
         // max geometry is skipped (treated as a duplicate of the last good frame) rather
         // than uploaded.
@@ -439,6 +458,7 @@ rp_result Runtime::reset() {
     have_last_ready_ = false; last_ready_idx_ = 0; last_ready_sv_ = 0;
     fps_ = 0.0; fps_t0_ns_ = 0; fps_count_ = 0;
     dr_have_ = false; dr_data_ = nullptr; dr_dupe_ = false;   // drop pointer into the about-to-be-freed instance
+    dr_is_gl_ = false; dr_gl_tex_ = 0;                        // and the GL-frame descriptor (stale after reboot)
     rewind_ring_.clear(); rewind_replay_ = false;             // don't rewind across a reboot
     const bool had_content = content_loaded_;
     const std::string path = content_path_;
@@ -503,6 +523,10 @@ void rp_runtime_audio_queue_stats(rp_runtime* rt, uint64_t* want_calls_out,
     if (want_calls_out)  *want_calls_out  = r->audio_want_calls();
     if (min_queued_out)  *min_queued_out  = r->audio_min_queued();
     if (starvations_out) *starvations_out = r->audio_starvations();
+}
+uint64_t rp_runtime_gl_frame_count(rp_runtime* rt) {
+    if (!rt) return 0;
+    return reinterpret_cast<Runtime*>(rt)->gl_frames();
 }
 size_t rp_runtime_serialize_size(rp_runtime* rt) {
     if (!rt) return 0;

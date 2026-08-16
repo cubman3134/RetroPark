@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define RETROPARK_ABI_VERSION 7u  /* was 6 -- rp_host_iface gains audio_want (presenting-core audio flow control) */
+#define RETROPARK_ABI_VERSION 8u  /* was 7 -- rp_host_iface gains gl_share_context + video_refresh_gl (B2 zero-copy GL) */
 #define RP_CORE_ABI_EXPORT_NAME "rp_get_core_abi"
 
 typedef enum rp_result {
@@ -118,6 +118,14 @@ typedef struct rp_host_iface {
        and the average pull rate self-locks to the host's true playback clock -- no free-running timer,
        no under/overrun crackle. Driven cores (host owns the frame clock) do not use this. */
     size_t (*audio_want)(rp_host* host);
+    /* B2 zero-copy GL (OpenGL host compositor + GL-producing driven cores). gl_share_context returns the
+       host's GL context handle (HGLRC on Win32) a core can share texture objects with (NULL if the host
+       backend is not GL). video_refresh_gl hands the host an already-GPU-resident GL texture (from the
+       shared context) to composite directly -- no CPU readback -- with its dimensions and origin
+       convention (bottom_left_origin != 0 => GL's native lower-left origin). Non-GL cores keep using
+       video_refresh (CPU path); the two are mutually exclusive per frame. */
+    void* (*gl_share_context)(rp_host* host);
+    void  (*video_refresh_gl)(rp_host* host, unsigned gl_texture, uint32_t width, uint32_t height, int bottom_left_origin);
 } rp_host_iface;
 
 typedef struct rp_core_info {

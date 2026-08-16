@@ -46,6 +46,8 @@ public:
     void on_video_refresh(const void* data, uint32_t w, uint32_t h, uint32_t pitch);
     void on_audio_sample(const int16_t* frames, size_t num_frames);
     size_t on_audio_want();   // presenting-core audio flow control (see rp_host_iface.audio_want)
+    void* on_gl_share_context();                                            // B2: host GL context to share with
+    void on_video_refresh_gl(unsigned tex, uint32_t w, uint32_t h, int blo); // B2: zero-copy GL frame handoff
 
     uint64_t audio_frames() const { return audio_frames_; }
     bool audio_nonsilent() const { return audio_nonsilent_; }
@@ -53,6 +55,7 @@ public:
     uint64_t audio_want_calls() const { return audio_want_calls_.load(std::memory_order_relaxed); }
     uint32_t audio_min_queued() const { return audio_ ? audio_->min_queued_frames() : 0xFFFFFFFFu; }
     uint32_t audio_starvations() const { return audio_ ? audio_->starvation_events() : 0; }
+    uint64_t gl_frames() const { return gl_frames_.load(std::memory_order_relaxed); }
 
 private:
     rp_result rebuild_surfaces(std::string& err);
@@ -78,6 +81,14 @@ private:
     uint32_t dr_w_ = 0, dr_h_ = 0, dr_pitch_ = 0;
     bool dr_dupe_ = false, dr_have_ = false;
     uint32_t dr_max_w_ = 0, dr_max_h_ = 0;
+    // B2 zero-copy GL frame: when a driven core delivers via video_refresh_gl, the present path
+    // composites this external GL texture instead of uploading dr_data_. dr_is_gl_ latches which
+    // path the most recent frame used (set true by on_video_refresh_gl, false by the CPU on_video_refresh).
+    unsigned dr_gl_tex_ = 0;
+    uint32_t dr_gl_w_ = 0, dr_gl_h_ = 0;
+    bool dr_gl_blo_ = false;
+    bool dr_is_gl_ = false;
+    std::atomic<uint64_t> gl_frames_{0};
     bool requires_content_ = false;
     bool content_loaded_ = false;
     std::unique_ptr<IAudioOutput> audio_;

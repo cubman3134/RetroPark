@@ -28,6 +28,10 @@ void        rp_runtime_set_input(rp_runtime* rt, uint32_t port, const rp_input_s
    Device-independent; used to prove a presenting core (e.g. Dolphin) is polling host input. */
 uint64_t    rp_runtime_input_poll_count(rp_runtime* rt);
 
+/* Number of B2 zero-copy GL frames a driven core has delivered via the video_refresh_gl host hook
+   since the last core load. >0 proves the zero-copy GL present path engaged (no CPU readback). */
+uint64_t    rp_runtime_gl_frame_count(rp_runtime* rt);
+
 /* Composite the latest core frame; if out_rgba != NULL copies the RGBA8 image. */
 rp_result   rp_runtime_present(rp_runtime* rt, uint8_t* out_rgba);
 
