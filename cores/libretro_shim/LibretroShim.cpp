@@ -72,6 +72,13 @@ struct Shim {
     std::vector<ShimOption> option_defs;                  // harvested, menu order
     std::unordered_map<std::string, size_t> option_index; // key -> index into option_defs
     std::string options_json_cache;                       // built lazily by core_options_json
+    // A3: user overrides + live-update latch. option_overrides holds the values the frontend set
+    // (empty => the core still runs on harvested defaults). options_dirty is raised on every set and
+    // consumed (cleared) by the core's next GET_VARIABLE_UPDATE poll so it re-reads changed keys live.
+    // get_scratch backs the const char* returned by GET_VARIABLE for the duration of that call.
+    std::unordered_map<std::string, std::string> option_overrides;  // key -> user value
+    bool options_dirty = false;                                     // GET_VARIABLE_UPDATE latch
+    std::string get_scratch;                                        // stable storage for GET_VARIABLE's value
 };
 
 // Register one harvested option, deduping by key (first declaration wins, matching the libretro
@@ -154,8 +161,12 @@ bool env_cb(unsigned cmd, void* data) {
             if (v->key) {
                 auto it = g->option_index.find(v->key);
                 if (it != g->option_index.end()) {
-                    // A3 will consult an overrides map here first; for now always the harvested default.
-                    v->value = g->option_defs[it->second].def.c_str();
+                    // Serve the user override when present, else the harvested default. The returned
+                    // const char* must outlive this call, so stage it in a per-Shim scratch string.
+                    auto ov = g->option_overrides.find(v->key);
+                    g->get_scratch = (ov != g->option_overrides.end()) ? ov->second
+                                                                       : g->option_defs[it->second].def;
+                    v->value = g->get_scratch.c_str();
                     return true;
                 }
             }
@@ -163,7 +174,9 @@ bool env_cb(unsigned cmd, void* data) {
             return false;
         }
         case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
-            *static_cast<bool*>(data) = false;
+            // Report+consume the dirty latch: true once after a set(), so the core re-reads changed keys.
+            *static_cast<bool*>(data) = g->options_dirty;
+            g->options_dirty = false;
             return true;
         case RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION:
             *static_cast<unsigned*>(data) = 2;   // shim understands the v2 core-options API (harvested below)
@@ -588,13 +601,34 @@ const char* sh_core_options_json(rp_core* core) {
     return j.c_str();
 }
 
+// --- core_option_get/set (A3). get returns the effective value (override else harvested default) for a
+// known key, or NULL if the core never declared it. set records an override and raises the dirty latch so
+// the running core re-reads the key on its next GET_VARIABLE_UPDATE. ---
+const char* sh_core_option_get(rp_core* core, const char* key) {
+    Shim* s = reinterpret_cast<Shim*>(core);
+    auto it = s->option_index.find(key ? key : "");
+    if (it == s->option_index.end()) return nullptr;
+    auto ov = s->option_overrides.find(key);
+    static thread_local std::string ret;   // stable lifetime for the returned c_str
+    ret = (ov != s->option_overrides.end()) ? ov->second : s->option_defs[it->second].def;
+    return ret.c_str();
+}
+rp_result sh_core_option_set(rp_core* core, const char* key, const char* value) {
+    Shim* s = reinterpret_cast<Shim*>(core);
+    if (!key || !value) return RP_ERR_BAD_ARG;
+    if (!s->option_index.count(key)) return RP_ERR_NOT_FOUND;
+    s->option_overrides[key] = value;
+    s->options_dirty = true;
+    return RP_OK;
+}
+
 const rp_core_abi kAbi = {
     RETROPARK_ABI_VERSION, sh_get_info, sh_create, sh_destroy,
     nullptr, nullptr, nullptr,          // set_surfaces, start, stop
     sh_get_av_info, sh_run_frame,
     sh_serialize_size, sh_serialize, sh_unserialize,
     sh_load_content,
-    sh_core_options_json, nullptr, nullptr   // core_options_json; core_option_get/set land in A3
+    sh_core_options_json, sh_core_option_get, sh_core_option_set   // full A3 option channel
 };
 
 } // namespace
