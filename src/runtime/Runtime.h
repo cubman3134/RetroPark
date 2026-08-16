@@ -39,6 +39,9 @@ public:
     rp_result resume();
     rp_result reset();
     rp_result get_status(rp_runtime_status* out);
+    const char* core_options_json();
+    const char* core_option_get(const char* key);
+    rp_result   core_option_set(const char* key, const char* value);
 
     // Host-iface trampolines.
     void on_submit(uint32_t index, uint64_t generation, uint64_t sync_value);

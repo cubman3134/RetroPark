@@ -82,6 +82,23 @@ rp_result CoreLoader::load_content(const char* path, std::string& error) {
     return abi_->load_content(core_, path);
 }
 
+const char* CoreLoader::core_options_json() {
+    if ((state_ != LoaderState::Created && state_ != LoaderState::Started) || !abi_ || !abi_->core_options_json)
+        return "[]";
+    const char* j = abi_->core_options_json(core_);
+    return j ? j : "[]";
+}
+const char* CoreLoader::core_option_get(const char* key) {
+    if ((state_ != LoaderState::Created && state_ != LoaderState::Started) || !abi_ || !abi_->core_option_get)
+        return nullptr;
+    return abi_->core_option_get(core_, key);
+}
+rp_result CoreLoader::core_option_set(const char* key, const char* value) {
+    if ((state_ != LoaderState::Created && state_ != LoaderState::Started) || !abi_ || !abi_->core_option_set)
+        return RP_ERR_UNSUPPORTED;
+    return abi_->core_option_set(core_, key, value);
+}
+
 void CoreLoader::destroy() {
     if (state_ == LoaderState::Started) { std::string e; stop(e); }
     if (core_ && abi_ && abi_->destroy) abi_->destroy(core_);

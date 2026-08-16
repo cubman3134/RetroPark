@@ -100,6 +100,15 @@ typedef struct rp_runtime_status {
 /* Fill *out with the runtime's current state. RP_ERR_BAD_ARG if rt or out is null. */
 rp_result rp_runtime_get_status(rp_runtime* rt, rp_runtime_status* out);
 
+/* Core options for the loaded driven core. options_json returns "[]" when no core is loaded or the
+   core exposes no options; option_get returns NULL for unknown keys / no core; option_set returns
+   RP_ERR_UNSUPPORTED if the loaded core has no option channel (e.g. a presenting core), or
+   RP_ERR_NOT_FOUND for an unknown key. Returned strings are owned by the core (valid until the next
+   core unload / runtime destroy). */
+const char* rp_runtime_core_options_json(rp_runtime* rt);
+const char* rp_runtime_core_option_get(rp_runtime* rt, const char* key);
+rp_result   rp_runtime_core_option_set(rp_runtime* rt, const char* key, const char* value);
+
 #ifdef __cplusplus
 }
 #endif

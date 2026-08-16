@@ -476,6 +476,10 @@ rp_result Runtime::reset() {
     return RP_OK;
 }
 
+const char* Runtime::core_options_json() { return loader_.core_options_json(); }
+const char* Runtime::core_option_get(const char* key) { return loader_.core_option_get(key); }
+rp_result   Runtime::core_option_set(const char* key, const char* value) { return loader_.core_option_set(key, value); }
+
 } // namespace rp
 
 // ---- C API ----
@@ -558,5 +562,17 @@ rp_result rp_runtime_reset (rp_runtime* rt) { return rt ? reinterpret_cast<Runti
 rp_result rp_runtime_get_status(rp_runtime* rt, rp_runtime_status* out) {
     if (!rt) return RP_ERR_BAD_ARG;
     return reinterpret_cast<Runtime*>(rt)->get_status(out);
+}
+const char* rp_runtime_core_options_json(rp_runtime* rt) {
+    if (!rt) return "[]";
+    return reinterpret_cast<Runtime*>(rt)->core_options_json();
+}
+const char* rp_runtime_core_option_get(rp_runtime* rt, const char* key) {
+    if (!rt || !key) return nullptr;
+    return reinterpret_cast<Runtime*>(rt)->core_option_get(key);
+}
+rp_result rp_runtime_core_option_set(rp_runtime* rt, const char* key, const char* value) {
+    if (!rt || !key || !value) return RP_ERR_BAD_ARG;
+    return reinterpret_cast<Runtime*>(rt)->core_option_set(key, value);
 }
 }

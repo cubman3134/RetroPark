@@ -21,6 +21,9 @@ public:
     rp_result serialize(void* data, size_t size, std::string& error);
     rp_result unserialize(const void* data, size_t size, std::string& error);
     rp_result load_content(const char* path, std::string& error);
+    const char* core_options_json();
+    const char* core_option_get(const char* key);
+    rp_result   core_option_set(const char* key, const char* value);
 
     LoaderState state() const { return state_; }
     const rp_core_abi* abi() const { return abi_; }

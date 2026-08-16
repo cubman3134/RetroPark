@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define RETROPARK_ABI_VERSION 8u  /* was 7 -- rp_host_iface gains gl_share_context + video_refresh_gl (B2 zero-copy GL) */
+#define RETROPARK_ABI_VERSION 9u  /* was 8 -- rp_core_abi gains core_options_json + core_option_get/set (core-options parity) */
 #define RP_CORE_ABI_EXPORT_NAME "rp_get_core_abi"
 
 typedef enum rp_result {
@@ -149,6 +149,14 @@ typedef struct rp_core_abi {
     rp_result (*serialize)(rp_core* core, void* data, size_t size);
     rp_result (*unserialize)(rp_core* core, const void* data, size_t size);
     rp_result (*load_content)(rp_core* core, const char* path);
+    /* Core options (driven libretro-shim cores). A core with no options leaves these NULL.
+       core_options_json returns a JSON array [{key,desc,info,default,values:[{value,label}]}]
+       ("[]" if none), owned by the core, valid until destroy. core_option_get returns the current
+       effective value (override else default) for key, or NULL if unknown. core_option_set records
+       an override (RP_ERR_NOT_FOUND for an unknown key) so the core re-reads it. */
+    const char* (*core_options_json)(rp_core* core);
+    const char* (*core_option_get)(rp_core* core, const char* key);
+    rp_result   (*core_option_set)(rp_core* core, const char* key, const char* value);
 } rp_core_abi;
 
 typedef const rp_core_abi* (*rp_get_core_abi_fn)(void);
