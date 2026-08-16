@@ -4,7 +4,8 @@ namespace rp {
 enum { GL_TEXTURE_2D=0x0DE1, GL_RGBA8=0x8058, GL_RGBA=0x1908, GL_UBYTE=0x1401, GL_NEAREST=0x2600,
        GL_LINEAR=0x2601, GL_MIN=0x2801, GL_MAG=0x2800, GL_CLAMP=0x812F, GL_WRAP_S=0x2802, GL_WRAP_T=0x2803,
        GL_FRAMEBUFFER=0x8D40, GL_COLOR_ATTACH0=0x8CE0, GL_FB_COMPLETE=0x8CD5, GL_COLOR_BUFFER_BIT=0x4000,
-       GL_UNPACK_ROW_LENGTH=0x0CF2, GL_PACK_ALIGNMENT=0x0D05, GL_UNPACK_ALIGNMENT=0x0CF5 };
+       GL_UNPACK_ROW_LENGTH=0x0CF2, GL_PACK_ALIGNMENT=0x0D05, GL_UNPACK_ALIGNMENT=0x0CF5,
+       GL_TEXTURE_WIDTH=0x1000, GL_TEXTURE_HEIGHT=0x1001 };
 
 rp_result GLBackend::initialize(void* native_window, uint32_t w, uint32_t h, std::string& err) {
     width_=w; height_=h; headless_=(native_window==nullptr); ready_=false;
@@ -105,10 +106,18 @@ rp_result GLBackend::composite_external_gl(unsigned tex, uint32_t w, uint32_t h,
     if (!headless_) { uint32_t cw=0,ch=0; ctx_.client_size(cw,ch); if (cw&&ch){ vw=(GLsizei)cw; vh=(GLsizei)ch; } }
     g.Viewport(0,0,vw,vh);
     g.ClearColor(0,0,0,1); g.Clear(GL_COLOR_BUFFER_BIT);
+    // A HW-render core allocates its FBO texture at its MAX geometry but may render a smaller w*h frame into
+    // the bottom-left corner. Sample only that valid w*h sub-region (else the frame corner-renders): scale the
+    // UVs by (w/texW, h/texH). Query the texture's own size rather than trusting a max we don't track here.
+    g.BindTexture(GL_TEXTURE_2D, (GLuint)tex);
+    GLint texW=0, texH=0;
+    g.GetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &texW);
+    g.GetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &texH);
+    float sx = (texW>0 && w<=(uint32_t)texW) ? (float)w/(float)texW : 1.0f;
+    float sy = (texH>0 && h<=(uint32_t)texH) ? (float)h/(float)texH : 1.0f;
     // CPU-upload frames are top-origin -> flipV=1 (see composite_driven). An external HW-render FBO texture is
     // GL bottom-origin -> the OPPOSITE flip. So flipV = bottom_left_origin ? 0 : 1. (Pinned by the flip test.)
-    comp_.draw(g, (GLuint)tex, bottom_left_origin ? 0 : 1);
-    (void)w; (void)h;   // the texture carries its own size; we composite into the host surface (width_/height_)
+    comp_.draw(g, (GLuint)tex, bottom_left_origin ? 0 : 1, sx, sy);
     if (headless_ && out_rgba) {
         g.PixelStorei(GL_PACK_ALIGNMENT,1);
         std::vector<uint8_t> flip((size_t)width_*height_*4);

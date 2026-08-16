@@ -94,6 +94,7 @@ bool GLContext::initialize(void* native_window, uint32_t w, uint32_t h, std::str
     LD(CreateProgram,"glCreateProgram") LD(AttachShader,"glAttachShader") LD(LinkProgram,"glLinkProgram")
     LD(GetProgramiv,"glGetProgramiv") LD(GetProgramInfoLog,"glGetProgramInfoLog") LD(UseProgram,"glUseProgram")
     LD(DeleteShader,"glDeleteShader") LD(GetUniformLocation,"glGetUniformLocation") LD(Uniform1i,"glUniform1i")
+    LD(Uniform2f,"glUniform2f") LD(GetTexLevelParameteriv,"glGetTexLevelParameteriv")
     LD(ActiveTexture,"glActiveTexture")
     LD(GenRenderbuffers,"glGenRenderbuffers") LD(BindRenderbuffer,"glBindRenderbuffer")
     LD(RenderbufferStorage,"glRenderbufferStorage") LD(FramebufferRenderbuffer,"glFramebufferRenderbuffer")

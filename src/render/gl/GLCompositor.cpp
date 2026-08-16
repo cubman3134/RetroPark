@@ -16,14 +16,16 @@ bool GLCompositor::initialize(const GLFns& g, std::string& err) {
     if(!ok){ char log[512]; GLsizei n=0; g.GetProgramInfoLog(prog_,512,&n,log); err.assign(log,n); return false; }
     uTex_=g.GetUniformLocation(prog_,"uTex");
     uFlipV_=g.GetUniformLocation(prog_,"uFlipV");
+    uUVScale_=g.GetUniformLocation(prog_,"uUVScale");
     g.GenVertexArrays(1,&vao_);
     return true;
 }
-void GLCompositor::draw(const GLFns& g, GLuint tex, int flipV) {
+void GLCompositor::draw(const GLFns& g, GLuint tex, int flipV, float uvScaleX, float uvScaleY) {
     g.UseProgram(prog_); g.BindVertexArray(vao_);
     g.ActiveTexture(0x84C0/*TEXTURE0*/); g.BindTexture(0x0DE1/*TEXTURE_2D*/,tex);
     if(uTex_>=0) g.Uniform1i(uTex_,0);
     if(uFlipV_>=0) g.Uniform1i(uFlipV_,flipV);
+    if(uUVScale_>=0) g.Uniform2f(uUVScale_,uvScaleX,uvScaleY);
     g.DrawArrays(0x0004/*GL_TRIANGLES*/,0,3);
 }
 void GLCompositor::destroy(const GLFns&) { /* program/vao freed with the context */ }

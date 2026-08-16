@@ -40,6 +40,8 @@ struct GLFns {
     void (WINAPI *GetProgramInfoLog)(GLuint,GLsizei,GLsizei*,GLchar*);
     void (WINAPI *UseProgram)(GLuint); void (WINAPI *DeleteShader)(GLuint);
     GLint (WINAPI *GetUniformLocation)(GLuint,const GLchar*); void (WINAPI *Uniform1i)(GLint,GLint);
+    void (WINAPI *Uniform2f)(GLint,GLfloat,GLfloat);
+    void (WINAPI *GetTexLevelParameteriv)(GLenum,GLint,GLenum,GLint*);
     void (WINAPI *ActiveTexture)(GLenum);
     void (WINAPI *GenRenderbuffers)(GLsizei,GLuint*);
     void (WINAPI *BindRenderbuffer)(GLenum,GLuint);
