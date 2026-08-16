@@ -106,3 +106,9 @@ add_dependencies(retropark_tests LibretroShim)
 target_compile_definitions(retropark_tests PRIVATE
   RP_SHIM_DIR="$<TARGET_FILE_DIR:LibretroShim>/cores/libretro_shim"
   RP_NES_ROM_DIR="C:/RetroBat/roms/nes")
+
+# Core-options harvest test loads the N64 shim package (LibretroShim.dll + core.json => mupen64plus_next)
+# staged by cores/libretro_shim at build/cores/libretro_shim_n64 when the Mupen core was downloaded.
+# Mirror the literal the N64 HW-render e2e uses as its RP_N64_CORE_DIR default.
+target_compile_definitions(retropark_tests PRIVATE
+  RP_N64_SHIM_DIR="${CMAKE_BINARY_DIR}/cores/libretro_shim_n64")

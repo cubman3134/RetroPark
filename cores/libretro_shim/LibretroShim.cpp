@@ -14,12 +14,22 @@
 #include <sstream>
 #include <cstdint>
 #include <cstdarg>
+#include <cstdio>
 #include <memory>
+#include <utility>
 #include <unordered_map>
 
 #define RP_EXPORT extern "C" __declspec(dllexport)
 
 namespace {
+
+// One harvested core option. `values[0]` is the source of the default when the core's options API
+// gives no explicit default_value (the legacy SET_VARIABLES path). `label` falls back to `value`
+// when the core supplies no label (the v1/v2 definition path).
+struct ShimOption {
+    std::string key, desc, info, def;
+    std::vector<std::pair<std::string,std::string>> values;  // (value, label); values[0] == default source
+};
 
 struct Shim {
     rp_host_iface host{};
@@ -54,11 +64,24 @@ struct Shim {
     bool hw_requested = false;
     std::unique_ptr<rp::HwRenderGL> hw;
     rp_input_state input[2]{};      // last input snapshot from RetroPark, per port
-    // Core option defaults captured from RETRO_ENVIRONMENT_SET_VARIABLES (legacy variable
-    // API), keyed by option key. Populated once at retro_set_environment-driven negotiation,
-    // before retro_load_game; answered back verbatim on GET_VARIABLE (see below).
-    std::unordered_map<std::string, std::string> option_defaults;
+    // Core options harvested from whichever options API the wrapped core uses (legacy SET_VARIABLES or
+    // the v1/v2 SET_CORE_OPTIONS[_INTL][_V2] descriptor forms), in the menu order the core declared them.
+    // Populated once at retro_set_environment-driven negotiation, before retro_load_game; GET_VARIABLE
+    // answers each key's default (see below), and core_options_json serializes the whole set.
+    // (A3 adds: overrides map + dirty flag)
+    std::vector<ShimOption> option_defs;                  // harvested, menu order
+    std::unordered_map<std::string, size_t> option_index; // key -> index into option_defs
+    std::string options_json_cache;                       // built lazily by core_options_json
 };
+
+// Register one harvested option, deduping by key (first declaration wins, matching the libretro
+// contract that a core declares each key once). An empty key is ignored.
+void shim_add_option(Shim* s, const std::string& key, const std::string& desc, const std::string& info,
+                     std::vector<std::pair<std::string,std::string>> values, const std::string& def) {
+    if (key.empty() || s->option_index.count(key)) return;
+    s->option_index[key] = s->option_defs.size();
+    s->option_defs.push_back({key, desc, info, def, std::move(values)});
+}
 
 // RETRO_ENVIRONMENT_SET_VARIABLES's retro_variable::value is, per the libretro spec, a
 // "<human title>; <default>|<opt2>|<opt3>..." string. Many cores (FCEUmm's sound volume
@@ -129,9 +152,10 @@ bool env_cb(unsigned cmd, void* data) {
         case RETRO_ENVIRONMENT_GET_VARIABLE: {
             auto* v = static_cast<retro_variable*>(data);
             if (v->key) {
-                auto it = g->option_defaults.find(v->key);
-                if (it != g->option_defaults.end()) {
-                    v->value = it->second.c_str();
+                auto it = g->option_index.find(v->key);
+                if (it != g->option_index.end()) {
+                    // A3 will consult an overrides map here first; for now always the harvested default.
+                    v->value = g->option_defs[it->second].def.c_str();
                     return true;
                 }
             }
@@ -142,7 +166,7 @@ bool env_cb(unsigned cmd, void* data) {
             *static_cast<bool*>(data) = false;
             return true;
         case RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION:
-            *static_cast<unsigned*>(data) = 0;   // legacy variable interface only
+            *static_cast<unsigned*>(data) = 2;   // shim understands the v2 core-options API (harvested below)
             return true;
         case RETRO_ENVIRONMENT_GET_LANGUAGE:
             *static_cast<unsigned*>(data) = RETRO_LANGUAGE_ENGLISH;
@@ -158,34 +182,83 @@ bool env_cb(unsigned cmd, void* data) {
         case RETRO_ENVIRONMENT_GET_FASTFORWARDING:
             *static_cast<bool*>(data) = false;
             return true;
-        // Legacy core-option negotiation: capture each option's default token so a later
-        // GET_VARIABLE can answer it (see first_option_value's comment for why this matters
-        // — some cores hold option-derived state, like sound volume, in a zero-init static
-        // that a "no such variable" GET_VARIABLE answer never overwrites).
+        // Legacy core-option negotiation. Each retro_variable::value is "<desc>; v1|v2|v3" with v1 as
+        // the default (see first_option_value's comment for why the default matters — some cores hold
+        // option-derived state, like sound volume, in a zero-init static that a "no such variable"
+        // GET_VARIABLE answer never overwrites). Harvest the full definition (desc + values + default)
+        // so core_options_json can serve it, not just the default token.
         case RETRO_ENVIRONMENT_SET_VARIABLES: {
             const auto* vars = static_cast<const retro_variable*>(data);
-            if (vars) {
-                for (; vars->key; ++vars) {
-                    std::string def;
-                    if (vars->value && first_option_value(vars->value, def)) {
-                        g->option_defaults[vars->key] = def;
+            for (; vars && vars->key; ++vars) {
+                const std::string str = vars->value ? vars->value : "";
+                std::string desc;
+                std::vector<std::pair<std::string,std::string>> vals;
+                const size_t semi = str.find(';');
+                if (semi != std::string::npos) {
+                    desc = str.substr(0, semi);
+                    size_t i = semi + 1;
+                    while (i < str.size() && str[i] == ' ') ++i;   // skip the single space after ';'
+                    for (size_t start = i; start <= str.size(); ) {
+                        const size_t bar = str.find('|', start);
+                        const std::string tok = str.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
+                        if (!tok.empty()) vals.emplace_back(tok, tok);   // legacy: label == value
+                        if (bar == std::string::npos) break;
+                        start = bar + 1;
                     }
+                } else {
+                    desc = str;   // spec-violating declaration with no ';': no parseable values/default
                 }
+                const std::string def = vals.empty() ? std::string() : vals.front().first;
+                shim_add_option(g, vars->key, desc, "", std::move(vals), def);
             }
             return true;
         }
-        // Descriptor/registration commands: accept and ignore. The shim uses a
-        // fixed NES joypad map and requeries av_info each present, so geometry /
-        // av-info updates need no bookkeeping here. GET_CORE_OPTIONS_VERSION reports 0
-        // above, so a well-behaved core negotiates options via the legacy SET_VARIABLES
-        // path handled above rather than these v1/v2 descriptor forms; still accept them
-        // (return true, do nothing) in case a core calls them anyway.
+        // v1 core-options (RETRO_ENVIRONMENT_SET_CORE_OPTIONS[_INTL]). Each retro_core_option_definition
+        // carries key/desc/info, an explicit default_value, and a value[]/label[] list terminated by a
+        // null `value`. The _INTL form wraps the same definition array in `.us` (localized `.local`
+        // ignored — the shim reports English).
+        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS:
+        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_INTL: {
+            const retro_core_option_definition* d = nullptr;
+            if (cmd == RETRO_ENVIRONMENT_SET_CORE_OPTIONS)
+                d = static_cast<const retro_core_option_definition*>(data);
+            else if (const auto* intl = static_cast<const retro_core_options_intl*>(data))
+                d = intl->us;
+            for (; d && d->key; ++d) {
+                std::vector<std::pair<std::string,std::string>> vals;
+                for (int i = 0; i < RETRO_NUM_CORE_OPTION_VALUES_MAX && d->values[i].value; ++i)
+                    vals.emplace_back(d->values[i].value, d->values[i].label ? d->values[i].label : d->values[i].value);
+                std::string def = d->default_value ? d->default_value : "";
+                if (def.empty() && !vals.empty()) def = vals.front().first;
+                shim_add_option(g, d->key, d->desc ? d->desc : "", d->info ? d->info : "", std::move(vals), def);
+            }
+            return true;
+        }
+        // v2 core-options (RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2[_INTL]). Same fields as v1 plus category
+        // metadata (ignored); the definitions live under the struct's `.definitions`, and the _INTL form
+        // wraps the v2 struct in `.us`.
+        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2:
+        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2_INTL: {
+            const retro_core_option_v2_definition* d = nullptr;
+            if (cmd == RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2) {
+                if (const auto* v2 = static_cast<const retro_core_options_v2*>(data)) d = v2->definitions;
+            } else if (const auto* v2i = static_cast<const retro_core_options_v2_intl*>(data)) {
+                if (v2i->us) d = v2i->us->definitions;
+            }
+            for (; d && d->key; ++d) {
+                std::vector<std::pair<std::string,std::string>> vals;
+                for (int i = 0; i < RETRO_NUM_CORE_OPTION_VALUES_MAX && d->values[i].value; ++i)
+                    vals.emplace_back(d->values[i].value, d->values[i].label ? d->values[i].label : d->values[i].value);
+                std::string def = d->default_value ? d->default_value : "";
+                if (def.empty() && !vals.empty()) def = vals.front().first;
+                shim_add_option(g, d->key, d->desc ? d->desc : "", d->info ? d->info : "", std::move(vals), def);
+            }
+            return true;
+        }
+        // Descriptor/registration commands: accept and ignore. The shim uses a fixed joypad map and
+        // requeries av_info each present, so geometry / av-info updates need no bookkeeping here.
         case RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS:
         case RETRO_ENVIRONMENT_SET_CONTROLLER_INFO:
-        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS:
-        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_INTL:
-        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2:
-        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2_INTL:
         case RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME:
         case RETRO_ENVIRONMENT_SET_MEMORY_MAPS:
         case RETRO_ENVIRONMENT_SET_SUBSYSTEM_INFO:
@@ -479,12 +552,49 @@ void sh_destroy(rp_core* core) {
     delete s;
 }
 
+// --- core_options_json (A2). Serialize the harvested option set as the ABI-documented JSON array
+// [{key,desc,info,default,values:[{value,label}]}] ("[]" if none). Hand-rolled (no JSON lib in the
+// shim); every string field is escaped. The result is cached on the Shim and stays valid until the
+// core is destroyed. get/set land in A3 (their fptrs are NULL here). ---
+void json_escape(const std::string& in, std::string& out) {
+    for (char c : in) {
+        switch (c) {
+            case '"': out += "\\\""; break;  case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;  case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default: if ((unsigned char)c < 0x20) { char b[8]; std::snprintf(b, sizeof b, "\\u%04x", c); out += b; }
+                     else out += c;
+        }
+    }
+}
+
+const char* sh_core_options_json(rp_core* core) {
+    Shim* s = reinterpret_cast<Shim*>(core);
+    std::string& j = s->options_json_cache;
+    j = "[";
+    for (size_t i = 0; i < s->option_defs.size(); ++i) {
+        const ShimOption& o = s->option_defs[i];
+        if (i) j += ",";
+        std::string k, d, inf, def; json_escape(o.key, k); json_escape(o.desc, d); json_escape(o.info, inf); json_escape(o.def, def);
+        j += "{\"key\":\"" + k + "\",\"desc\":\"" + d + "\",\"info\":\"" + inf + "\",\"default\":\"" + def + "\",\"values\":[";
+        for (size_t v = 0; v < o.values.size(); ++v) {
+            if (v) j += ",";
+            std::string vv, vl; json_escape(o.values[v].first, vv); json_escape(o.values[v].second, vl);
+            j += "{\"value\":\"" + vv + "\",\"label\":\"" + vl + "\"}";
+        }
+        j += "]}";
+    }
+    j += "]";
+    return j.c_str();
+}
+
 const rp_core_abi kAbi = {
     RETROPARK_ABI_VERSION, sh_get_info, sh_create, sh_destroy,
     nullptr, nullptr, nullptr,          // set_surfaces, start, stop
     sh_get_av_info, sh_run_frame,
     sh_serialize_size, sh_serialize, sh_unserialize,
-    sh_load_content
+    sh_load_content,
+    sh_core_options_json, nullptr, nullptr   // core_options_json; core_option_get/set land in A3
 };
 
 } // namespace
