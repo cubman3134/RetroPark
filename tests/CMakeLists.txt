@@ -35,6 +35,7 @@ add_executable(retropark_tests
   test_rollback_e2e.cpp
   test_dolphin_handoff.cpp
   test_dolphin_core_e2e.cpp
+  test_dolphin_core_options.cpp
   test_xinput_map.cpp
   test_dolphin_savestate_e2e.cpp
   test_dolphin_netplay_e2e.cpp
