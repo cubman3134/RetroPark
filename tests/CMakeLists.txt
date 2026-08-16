@@ -46,6 +46,7 @@ add_executable(retropark_tests
   test_hwrender_gl.cpp
   test_hwrender_n64_e2e.cpp
   test_shim_input.cpp
+  test_core_options.cpp
   ${CMAKE_SOURCE_DIR}/cores/libretro_shim/HwRenderGL.cpp)
 target_link_libraries(retropark_tests PRIVATE retropark doctest::doctest nlohmann_json::nlohmann_json retropark_libretro_convert)
 
@@ -105,3 +106,9 @@ add_dependencies(retropark_tests LibretroShim)
 target_compile_definitions(retropark_tests PRIVATE
   RP_SHIM_DIR="$<TARGET_FILE_DIR:LibretroShim>/cores/libretro_shim"
   RP_NES_ROM_DIR="C:/RetroBat/roms/nes")
+
+# Core-options harvest test loads the N64 shim package (LibretroShim.dll + core.json => mupen64plus_next)
+# staged by cores/libretro_shim at build/cores/libretro_shim_n64 when the Mupen core was downloaded.
+# Mirror the literal the N64 HW-render e2e uses as its RP_N64_CORE_DIR default.
+target_compile_definitions(retropark_tests PRIVATE
+  RP_N64_SHIM_DIR="${CMAKE_BINARY_DIR}/cores/libretro_shim_n64")
