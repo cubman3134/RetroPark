@@ -216,10 +216,14 @@ bool env_cb(unsigned cmd, void* data) {
 
 void video_cb(const void* data, unsigned w, unsigned h, size_t pitch) {
     if (data == RETRO_HW_FRAME_BUFFER_VALID) {          // HW-render: the core drew into our FBO
-        uint32_t p = 0;
-        const void* rgba = g->hw ? g->hw->read_frame(w, h, p) : nullptr;
-        if (rgba) g->host.video_refresh(g->host.host, rgba, w, h, p);
-        else      g->host.video_refresh(g->host.host, nullptr, w, h, 0);
+        if (g->hw && g->hw->zero_copy() && g->host.video_refresh_gl) {   // B2: hand the GL texture, no readback
+            g->host.video_refresh_gl(g->host.host, g->hw->color_texture(), w, h, /*bottom_left_origin*/1);
+        } else {                                                        // B1: read the FBO back to CPU RGBA
+            uint32_t cw = w, ch = h, p = 0;
+            const void* rgba = g->hw ? g->hw->read_frame(cw, ch, p) : nullptr;
+            if (rgba) g->host.video_refresh(g->host.host, rgba, cw, ch, p);
+            else      g->host.video_refresh(g->host.host, nullptr, w, h, 0);
+        }
         return;
     }
     if (!data || w == 0 || h == 0) {   // duplicate frame (SW or HW dupe)
@@ -406,8 +410,11 @@ rp_result sh_load_content(rp_core* core, const char* path) {
         uint32_t mh = av.max_height > av.base_height ? av.max_height : av.base_height;
         s->hw = std::make_unique<rp::HwRenderGL>();
         std::string e;
+        // B2: if the host is GL, share its context so the FBO texture can be handed back zero-copy.
+        // gl_share_context returns null on a non-GL host (D3D11/Vulkan) -> HwRenderGL runs standalone (B1).
+        void* share = s->host.gl_share_context ? s->host.gl_share_context(s->host.host) : nullptr;
         if (!s->hw->setup(s->hw_cb.depth, s->hw_cb.stencil, s->hw_cb.bottom_left_origin,
-                          mw, mh, (int)s->hw_cb.version_major, (int)s->hw_cb.version_minor, e)) {
+                          mw, mh, (int)s->hw_cb.version_major, (int)s->hw_cb.version_minor, share, e)) {
             if (s->retro_unload_game) s->retro_unload_game();   // unwind the load the core already did
             s->hw.reset(); s->game_loaded = false;
             return RP_ERR_DEVICE;                        // HW core can't run without its GL context

@@ -7,9 +7,17 @@ enum { GL_TEXTURE_2D=0x0DE1, GL_RGBA8=0x8058, GL_RGBA=0x1908, GL_UBYTE=0x1401, G
        GL_FB_COMPLETE=0x8CD5, GL_PACK_ALIGNMENT=0x0D05, GL_COLOR_BUFFER_BIT=0x4000, GL_SCISSOR_TEST=0x0C11 };
 
 bool HwRenderGL::setup(bool depth, bool stencil, bool blo, uint32_t maxW, uint32_t maxH,
-                       int major, int minor, std::string& err) {
+                       int major, int minor, void* share_context, std::string& err) {
     maxW_ = maxW ? maxW : 1; maxH_ = maxH ? maxH : 1; blo_ = blo;
-    if (!ctx_.initialize(nullptr, maxW_, maxH_, err, major, minor)) return false;
+    if (!ctx_.initialize(nullptr, maxW_, maxH_, err, major, minor, share_context)) {
+        if (share_context) {   // B2: sharing the host's GL context failed -- degrade to B1 (standalone) readback
+            if (!ctx_.initialize(nullptr, maxW_, maxH_, err, major, minor, nullptr)) return false;
+        } else {
+            return false;
+        }
+    } else {
+        zero_copy_ = (share_context != nullptr);   // only true when the SHARED init succeeded
+    }
     if (!ctx_.make_current()) { err = "make_current"; return false; }
     const GLFns& g = ctx_.gl();
     g.GenFramebuffers(1, &fbo_); g.BindFramebuffer(GL_FRAMEBUFFER, fbo_);

@@ -9,8 +9,10 @@ namespace rp {
 class HwRenderGL {
 public:
     bool setup(bool depth, bool stencil, bool bottom_left_origin,
-               uint32_t maxW, uint32_t maxH, int major, int minor, std::string& err);
+               uint32_t maxW, uint32_t maxH, int major, int minor, void* share_context, std::string& err);
     unsigned fbo_id() const { return fbo_; }              // for get_current_framebuffer
+    unsigned color_texture() const { return color_; }     // B2: the FBO color texture (zero-copy handoff)
+    bool zero_copy() const { return zero_copy_; }         // true iff we share the host's GL context
     bool make_current() { return ctx_.make_current(); }   // before each retro_run
     // Read the w*h region of the FBO to top-origin RGBA8; returns an internal buffer valid until the next
     // call. out_pitch = w*4. Flips rows iff the core uses bottom-left origin (GL default).
@@ -28,6 +30,7 @@ private:
     unsigned fbo_ = 0, color_ = 0, depth_rb_ = 0;
     uint32_t maxW_ = 0, maxH_ = 0;
     bool blo_ = true;
+    bool zero_copy_ = false;
     std::vector<uint8_t> read_, flip_;
 };
 } // namespace rp

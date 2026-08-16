@@ -5,7 +5,7 @@ using namespace rp;
 TEST_CASE("hwrender gl: FBO readback is top-origin (flip works)") {
     if (!GLContext::probe()) { WARN("no GL 3.3"); return; }
     HwRenderGL hw; std::string err;
-    REQUIRE(hw.setup(/*depth*/true,/*stencil*/false,/*bottom_left_origin*/true, 8, 8, 3, 3, err));
+    REQUIRE(hw.setup(/*depth*/true,/*stencil*/false,/*bottom_left_origin*/true, 8, 8, 3, 3, /*share*/nullptr, err));
     REQUIRE(hw.make_current());
     hw.test_fill(0,255,0, 255,0,0);   // top green, bottom red (in visual/top-origin terms)
     uint32_t rw = 8, rh = 8, pitch = 0;   // read_frame clamps w/h in place -> pass lvalues
