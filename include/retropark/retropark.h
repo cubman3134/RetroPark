@@ -104,7 +104,8 @@ rp_result rp_runtime_get_status(rp_runtime* rt, rp_runtime_status* out);
    core exposes no options; option_get returns NULL for unknown keys / no core; option_set returns
    RP_ERR_UNSUPPORTED if the loaded core has no option channel (e.g. a presenting core), or
    RP_ERR_NOT_FOUND for an unknown key. Returned strings are owned by the core (valid until the next
-   core unload / runtime destroy). */
+   core unload / runtime destroy). Note that rp_runtime_reset recreates the core and therefore clears
+   all option overrides, so callers must re-apply any option_set values after a reset. */
 const char* rp_runtime_core_options_json(rp_runtime* rt);
 const char* rp_runtime_core_option_get(rp_runtime* rt, const char* key);
 rp_result   rp_runtime_core_option_set(rp_runtime* rt, const char* key, const char* value);

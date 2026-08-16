@@ -75,10 +75,14 @@ struct Shim {
     // A3: user overrides + live-update latch. option_overrides holds the values the frontend set
     // (empty => the core still runs on harvested defaults). options_dirty is raised on every set and
     // consumed (cleared) by the core's next GET_VARIABLE_UPDATE poll so it re-reads changed keys live.
-    // get_scratch backs the const char* returned by GET_VARIABLE for the duration of that call.
     std::unordered_map<std::string, std::string> option_overrides;  // key -> user value
     bool options_dirty = false;                                     // GET_VARIABLE_UPDATE latch
-    std::string get_scratch;                                        // stable storage for GET_VARIABLE's value
+    // Backing store for the const char* returned by GET_VARIABLE and core_option_get. Keyed by option
+    // key so each key owns its own std::string: the runtime doc contract says a returned value stays
+    // valid until the next core unload / runtime destroy, so two gets for different keys must not share
+    // one buffer (a single scratch string would make an earlier get dangle when a later get overwrites
+    // it). unordered_map is node-based, so an entry's address is stable across inserts of OTHER keys.
+    std::unordered_map<std::string, std::string> served_values;     // key -> stable served value
 };
 
 // Register one harvested option, deduping by key (first declaration wins, matching the libretro
@@ -88,31 +92,6 @@ void shim_add_option(Shim* s, const std::string& key, const std::string& desc, c
     if (key.empty() || s->option_index.count(key)) return;
     s->option_index[key] = s->option_defs.size();
     s->option_defs.push_back({key, desc, info, def, std::move(values)});
-}
-
-// RETRO_ENVIRONMENT_SET_VARIABLES's retro_variable::value is, per the libretro spec, a
-// "<human title>; <default>|<opt2>|<opt3>..." string. Many cores (FCEUmm's sound volume
-// among them) hold their internal option state in a plain static that is zero-initialized
-// until the frontend actually answers a later GET_VARIABLE for that key with a real value —
-// a frontend that always reports "no such variable" leaves those statics at their zero
-// default forever (e.g. FCEUmm's sndvolume stays 0 => silent output despite a real audio
-// stream being paced and forwarded). Extract the "<default>" token so GET_VARIABLE can hand
-// it back and cores initialize the way any real libretro frontend would leave them.
-//
-// Returns false (out untouched) when 'value' has no ';' separator — a malformed,
-// spec-violating declaration with no parseable default token. The caller must NOT store
-// an entry for such a key: GET_VARIABLE needs to fall through to its "no such variable"
-// answer (value=nullptr, false) rather than hand the core a bogus empty-string override.
-// Well-formed libretro declarations always contain ';', so this never affects a
-// conforming core's real defaults.
-bool first_option_value(const std::string& value, std::string& out) {
-    size_t semi = value.find(';');
-    if (semi == std::string::npos) return false;
-    size_t start = semi + 1;
-    while (start < value.size() && value[start] == ' ') ++start;
-    size_t bar = value.find('|', start);
-    out = value.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
-    return true;
 }
 
 // libretro's callbacks (env_cb, video_cb, input_poll_cb, ...) are global C functions with
@@ -162,11 +141,15 @@ bool env_cb(unsigned cmd, void* data) {
                 auto it = g->option_index.find(v->key);
                 if (it != g->option_index.end()) {
                     // Serve the user override when present, else the harvested default. The returned
-                    // const char* must outlive this call, so stage it in a per-Shim scratch string.
+                    // const char* must stay valid until the next core unload, and a wrapped core may
+                    // cache var.value across GET_VARIABLE calls for different keys, so give each key its
+                    // own stable storage in served_values rather than one shared scratch buffer.
                     auto ov = g->option_overrides.find(v->key);
-                    g->get_scratch = (ov != g->option_overrides.end()) ? ov->second
-                                                                       : g->option_defs[it->second].def;
-                    v->value = g->get_scratch.c_str();
+                    const std::string& eff = (ov != g->option_overrides.end())
+                                                 ? ov->second : g->option_defs[it->second].def;
+                    std::string& slot = g->served_values[v->key];
+                    slot = eff;
+                    v->value = slot.c_str();
                     return true;
                 }
             }
@@ -195,11 +178,16 @@ bool env_cb(unsigned cmd, void* data) {
         case RETRO_ENVIRONMENT_GET_FASTFORWARDING:
             *static_cast<bool*>(data) = false;
             return true;
-        // Legacy core-option negotiation. Each retro_variable::value is "<desc>; v1|v2|v3" with v1 as
-        // the default (see first_option_value's comment for why the default matters — some cores hold
-        // option-derived state, like sound volume, in a zero-init static that a "no such variable"
-        // GET_VARIABLE answer never overwrites). Harvest the full definition (desc + values + default)
-        // so core_options_json can serve it, not just the default token.
+        // Legacy core-option negotiation. Each retro_variable::value is, per the libretro spec, a
+        // "<desc>; v1|v2|v3" string with v1 as the default. The default matters: many cores (FCEUmm's
+        // sound volume among them) hold their internal option state in a plain static that is
+        // zero-initialized until the frontend answers a later GET_VARIABLE for that key with a real
+        // value — a frontend that always reports "no such variable" leaves those statics at their zero
+        // default forever (e.g. FCEUmm's sndvolume stays 0 => silent output despite a real audio stream
+        // being paced and forwarded). So harvest the full definition (desc + values + default), with the
+        // default token GET_VARIABLE hands back, and core_options_json serves the whole set. A
+        // spec-violating declaration with no ';' has no parseable values/default: it is stored with an
+        // empty default, and GET_VARIABLE hands back that empty string rather than "no such variable".
         case RETRO_ENVIRONMENT_SET_VARIABLES: {
             const auto* vars = static_cast<const retro_variable*>(data);
             for (; vars && vars->key; ++vars) {
@@ -210,7 +198,7 @@ bool env_cb(unsigned cmd, void* data) {
                 if (semi != std::string::npos) {
                     desc = str.substr(0, semi);
                     size_t i = semi + 1;
-                    while (i < str.size() && str[i] == ' ') ++i;   // skip the single space after ';'
+                    while (i < str.size() && str[i] == ' ') ++i;   // skip all spaces after ';' (spec uses one)
                     for (size_t start = i; start <= str.size(); ) {
                         const size_t bar = str.find('|', start);
                         const std::string tok = str.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
@@ -609,9 +597,13 @@ const char* sh_core_option_get(rp_core* core, const char* key) {
     auto it = s->option_index.find(key ? key : "");
     if (it == s->option_index.end()) return nullptr;
     auto ov = s->option_overrides.find(key);
-    static thread_local std::string ret;   // stable lifetime for the returned c_str
-    ret = (ov != s->option_overrides.end()) ? ov->second : s->option_defs[it->second].def;
-    return ret.c_str();
+    const std::string& eff = (ov != s->option_overrides.end()) ? ov->second : s->option_defs[it->second].def;
+    // Per-key stable storage so a caller can hold the result of get("a") while calling get("b"): the
+    // doc contract keeps a returned string valid until the next core unload, and unordered_map is
+    // node-based so served_values["a"]'s address survives inserting served_values["b"].
+    std::string& slot = s->served_values[it->first];
+    slot = eff;
+    return slot.c_str();
 }
 rp_result sh_core_option_set(rp_core* core, const char* key, const char* value) {
     Shim* s = reinterpret_cast<Shim*>(core);

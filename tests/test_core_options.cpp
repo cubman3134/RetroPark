@@ -104,3 +104,32 @@ TEST_CASE("core options: set override is echoed by get and flagged to the core")
     CHECK(rp_runtime_core_option_set(rt, "no-such-key", "x") == RP_ERR_NOT_FOUND);
     rp_runtime_destroy(rt);
 }
+
+// A3 lifetime regression: rp_runtime_core_option_get returns storage owned by the core that the header
+// documents as valid until the next core unload, so a pointer held for one key must survive a get of a
+// DIFFERENT key. Before the per-key served_values fix, every get aliased a single shared buffer, so the
+// first pointer would start reading the second key's value (or dangle). Gated like the cases above.
+TEST_CASE("core options: a held get survives a get of another key") {
+    if (!std::getenv("RP_RUN_N64")) { WARN("RP_RUN_N64 not set; skipping shim core-options lifetime"); return; }
+    rp_runtime* rt = rp_runtime_create(RP_GFX_D3D11, nullptr);
+    REQUIRE(rt != nullptr);
+    REQUIRE(rp_runtime_load_core(rt, RP_N64_SHIM_DIR) == RP_OK);
+
+    // Two distinct harvested keys (mupen exposes many).
+    std::string json = rp_runtime_core_options_json(rt);
+    size_t cur = 0;
+    std::string keyA = json_first_string(json, "key", cur);
+    std::string keyB = json_first_string(json, "key", cur);
+    REQUIRE(keyA.size() > 0);
+    REQUIRE(keyB.size() > 0);
+    REQUIRE(keyA != keyB);
+
+    const char* a = rp_runtime_core_option_get(rt, keyA.c_str());
+    REQUIRE(a != nullptr);
+    std::string a_when_fetched = a;                       // what keyA read the instant we got it
+    const char* b = rp_runtime_core_option_get(rt, keyB.c_str());
+    REQUIRE(b != nullptr);
+    CHECK(a != b);                                        // distinct per-key backing storage
+    CHECK(std::strcmp(a, a_when_fetched.c_str()) == 0);   // a still reads keyA's value, not keyB's
+    rp_runtime_destroy(rt);
+}
