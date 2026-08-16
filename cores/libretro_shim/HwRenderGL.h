@@ -8,6 +8,7 @@ namespace rp {
 // from LibretroShim's core-loading logic. Headless (its own GLContext) so it works under any host backend.
 class HwRenderGL {
 public:
+    ~HwRenderGL();
     bool setup(bool depth, bool stencil, bool bottom_left_origin,
                uint32_t maxW, uint32_t maxH, int major, int minor, void* share_context, std::string& err);
     unsigned fbo_id() const { return fbo_; }              // for get_current_framebuffer

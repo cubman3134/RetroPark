@@ -217,7 +217,8 @@ bool env_cb(unsigned cmd, void* data) {
 void video_cb(const void* data, unsigned w, unsigned h, size_t pitch) {
     if (data == RETRO_HW_FRAME_BUFFER_VALID) {          // HW-render: the core drew into our FBO
         if (g->hw && g->hw->zero_copy() && g->host.video_refresh_gl) {   // B2: hand the GL texture, no readback
-            g->host.video_refresh_gl(g->host.host, g->hw->color_texture(), w, h, /*bottom_left_origin*/1);
+            g->host.video_refresh_gl(g->host.host, g->hw->color_texture(), w, h,
+                                     g->hw_cb.bottom_left_origin ? 1 : 0);   // honor the core's declared origin
         } else {                                                        // B1: read the FBO back to CPU RGBA
             uint32_t cw = w, ch = h, p = 0;
             const void* rgba = g->hw ? g->hw->read_frame(cw, ch, p) : nullptr;

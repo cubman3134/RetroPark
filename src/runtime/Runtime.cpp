@@ -67,9 +67,13 @@ void Runtime::set_input(uint32_t port, const rp_input_state& in) {
     input_[port & 1u] = in;
 }
 void Runtime::on_video_refresh(const void* data, uint32_t w, uint32_t h, uint32_t pitch) {
+    // A DUPE (data==null) during a zero-copy run must keep presenting the last GL texture: the core didn't
+    // redraw its FBO, so dr_gl_tex_ still holds the last frame. Clearing dr_is_gl_ here would route present to
+    // composite_driven with no uploaded CPU frame (tex_w_==0) -> a one-frame black flash on every HW dupe.
+    if (!data && dr_is_gl_) { dr_have_ = true; return; }
     dr_have_ = true;
     dr_dupe_ = (data == nullptr);
-    dr_is_gl_ = false;              // a CPU frame clears the GL flag; present takes the upload path
+    dr_is_gl_ = false;              // a real CPU frame clears the GL flag; present takes the upload path
     dr_data_ = data;
     dr_w_ = w; dr_h_ = h; dr_pitch_ = pitch;
 }
