@@ -17,6 +17,35 @@
 #ifndef RP_N64_SHIM_DIR
 #define RP_N64_SHIM_DIR "C:/Users/cubma/source/repos/RetroPark/build/cores/libretro_shim_n64"
 #endif
+#ifndef RP_N64_ROM
+#define RP_N64_ROM "C:/Users/cubma/AppData/Local/Temp/n64rom/Banjo-Tooie (USA).n64"
+#endif
+
+// REPRO for the in-app "N64 pause-menu Core Options won't come up" bug: EB queries
+// rp_runtime_core_options_json on the RUNNING core (AFTER load_content), but every existing test only
+// checks it after load_core (no content). Mimic the in-app sequence and assert the options SURVIVE
+// content load (the HW-render N64 path re-enters retro_load_game, which some cores use to re-declare
+// options). Gated like the N64 e2e; needs the extracted ROM (RP_N64_ROM env overrides).
+TEST_CASE("core options: N64 options survive content load (in-app sequence)") {
+    if (!std::getenv("RP_RUN_N64")) { WARN("RP_RUN_N64 not set; skipping N64 content-load options repro"); return; }
+    const char* rom = std::getenv("RP_N64_ROM") ? std::getenv("RP_N64_ROM") : RP_N64_ROM;
+    // RP_TEST_GL selects the OpenGL host runtime (B2 zero-copy N64 path) vs the default D3D11 readback path,
+    // so this reproduces whichever driven backend the user picked.
+    const rp_graphics_api api = std::getenv("RP_TEST_GL") ? RP_GFX_OPENGL : RP_GFX_D3D11;
+    rp_runtime* rt = rp_runtime_create(api, nullptr);
+    REQUIRE(rt != nullptr);
+    REQUIRE(rp_runtime_resize(rt, 640, 480) == RP_OK);
+    REQUIRE(rp_runtime_load_core(rt, RP_N64_SHIM_DIR) == RP_OK);
+    const std::string beforeContent = rp_runtime_core_options_json(rt);
+    MESSAGE("after load_core: " << beforeContent.substr(0, 80));
+    CHECK(beforeContent.find("mupen64plus") != std::string::npos);   // present after load_core (proven by A2)
+
+    REQUIRE(rp_runtime_load_content(rt, rom) == RP_OK);               // HW-render setup + retro_load_game
+    const std::string afterContent = rp_runtime_core_options_json(rt);
+    MESSAGE("after load_content: " << afterContent.substr(0, 80));
+    CHECK(afterContent.find("mupen64plus") != std::string::npos);     // <-- do options SURVIVE content load?
+    rp_runtime_destroy(rt);
+}
 
 // A driven core with no option channel (fptrs NULL) must degrade gracefully through the whole
 // runtime -> loader -> core forwarding chain: json "[]", get NULL, set RP_ERR_UNSUPPORTED.
